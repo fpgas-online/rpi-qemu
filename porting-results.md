@@ -160,7 +160,28 @@ The `qemu_configure_nic_device()` in bcm2838_peripherals.c needs investigation -
 
 ## 6. U-Boot Verification (Step 6)
 
-*Pending -- U-Boot build and test in progress.*
+**Result: PASS -- U-Boot detects GENET and transmits BOOTP packets.**
+
+U-Boot 2026.04-rc5 built from source (`rpi_4_defconfig`), booted with external DTB.
+
+### Key output
+
+```
+DRAM:  960 MiB
+Net:   eth0: ethernet@7d580000
+...
+BOOTP broadcast 1
+BOOTP broadcast 2
+BOOTP broadcast 3
+```
+
+### Findings
+
+- **GENET detected**: `eth0: ethernet@7d580000` -- U-Boot's bcmgenet driver probed successfully
+- **TX path works**: 7 BOOTP broadcast packets sent (TX DMA descriptor ring is functional)
+- **No DHCP response**: Same NIC-netdev binding issue as Linux -- the SLIRP backend isn't connected to the NIC, so packets go nowhere
+- **PCIe partial**: `link up, ?? Gbps x63 (!SSC)` -- speed/width garbled (expected for incomplete PCIe emulation)
+- **USB not found**: xhci-pci depends on proper PCIe passthrough
 
 ---
 
@@ -173,7 +194,7 @@ The `qemu_configure_nic_device()` in bcm2838_peripherals.c needs investigation -
 | 3. Build | PASS | Zero errors, 116MB binary |
 | 4. Boot test | PASS | All 4 CPUs, all 4 new peripherals detected |
 | 5. Linux network | PARTIAL | Driver probes, NIC created; traffic test needs rootfs |
-| 6. U-Boot network | PENDING | Building |
+| 6. U-Boot network | PASS | GENET probes, BOOTP TX works |
 | 7. Documentation | DONE | This file |
 
 ### Remaining Work
