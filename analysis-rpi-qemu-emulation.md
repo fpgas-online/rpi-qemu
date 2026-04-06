@@ -226,7 +226,19 @@ Status flags: `DMA_OWN=0x8000`, `DMA_EOP=0x4000`, `DMA_SOP=0x2000`, `DMA_WRAP=0x
 - BCM2711 ARM Peripherals PDF: https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf
 - Ultibo wiki: https://ultibo.org/wiki/Unit_GENET
 
-### 3.5 Existing QEMU Network Device Models (Reference)
+### 3.5 Known Hardware Pitfalls
+
+Source: RPi Forum thread and community reverse-engineering (see `resources/reference/rpi-forum-genet-pitfalls.md`)
+
+1. **Link status interrupts are non-functional.** The INTRL2_0 LINK_UP/LINK_DOWN bits (0x10/0x20) do not fire. The UMAC Mode register at offset 0x0844 also does not respond to reads. Guest drivers must poll PHY status via MDIO instead. **Emulation impact**: simplifies interrupt handling -- no need to generate link change IRQs.
+
+2. **Write-once DMA ring registers.** Several ring configuration registers (write pointer, start/end address, producer/consumer index) can only be written once after a full BCM2711 hardware reset. Even a GENET software reset does not restore write capability. **Emulation impact**: may not need to emulate this quirk for Linux guests (the driver handles it), but worth noting for bare-metal or non-Linux guests.
+
+3. **DMA link recovery requires explicit FIFO flush.** On link disconnect/reconnect, the TX FIFO must be explicitly flushed or the first packets after reconnection contain corrupted data. **Emulation impact**: minor -- QEMU typically has a reliable virtual link.
+
+4. **No official Broadcom documentation exists.** All register specs come from driver source, reverse engineering, and community findings.
+
+### 3.6 Existing QEMU Network Device Models (Reference)
 
 These existing implementations demonstrate the patterns needed for a GENET model:
 
