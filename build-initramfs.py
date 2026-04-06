@@ -24,44 +24,40 @@ echo "=== QEMU RPi4B Network Test ==="
 echo "Waiting for network device..."
 sleep 2
 
-# Show network interfaces
-echo "=== ip link ==="
-ip link show
-
 # Bring up eth0
 echo "=== Bringing up eth0 ==="
 ip link set eth0 up
-echo "Waiting for link (10s for autoneg)..."
-sleep 10
-echo "=== carrier state ==="
-cat /sys/class/net/eth0/carrier 2>&1 || echo "no carrier file"
-cat /sys/class/net/eth0/operstate 2>&1 || echo "no operstate"
-ip link show eth0
+echo "Waiting for link..."
+sleep 8
 
-# Force IP even without carrier
-echo "=== Setting IP manually ==="
-ip addr add 10.0.2.15/24 dev eth0
-ip route add default via 10.0.2.2
+# Get IP via DHCP
+echo "=== Running DHCP ==="
+udhcpc -i eth0 -t 10 -T 3 -n -q 2>&1 || echo "DHCP failed, setting IP manually"
+
+# If DHCP failed, configure manually
+if ! ip addr show eth0 | grep -q "inet "; then
+    ip addr add 10.0.2.15/24 dev eth0
+    ip route add default via 10.0.2.2
+fi
+
+# Set up DNS (SLIRP DNS forwarder)
+echo "nameserver 10.0.2.3" > /etc/resolv.conf
+
+echo "=== Network config ==="
 ip addr show eth0
+ip route show
 
-echo "=== All interrupts ==="
-cat /proc/interrupts
-echo "=== dmesg genet ==="
-dmesg 2>&1 | grep -i "genet\|irq.*157\|irq.*158\|irq.*189\|irq.*190" | tail -10
-
-# Try ping
+# Ping gateway
 echo "=== Pinging 10.0.2.2 (QEMU gateway) ==="
-ping -c 3 -W 3 10.0.2.2 2>&1 || echo "Ping failed"
+ping -c 3 -W 3 10.0.2.2 2>&1 || echo "Ping gateway failed"
 
-echo "=== Interrupts after ping ==="
-grep -i genet /proc/interrupts 2>&1 || echo "no genet interrupts"
+# Ping internet (8.8.8.8)
+echo "=== Pinging 8.8.8.8 (Google DNS) ==="
+ping -c 3 -W 5 8.8.8.8 2>&1 || echo "Ping 8.8.8.8 failed"
 
-# Also try DHCP
-echo "=== Running udhcpc ==="
-udhcpc -i eth0 -t 5 -T 3 -n -q 2>&1 || echo "DHCP failed"
-
-echo "=== ip addr final ==="
-ip addr show eth0
+# Show dmesg for GENET
+echo "=== dmesg genet ==="
+dmesg 2>&1 | grep -i "genet\|Link is" | tail -5
 
 echo "=== Network test complete ==="
 
