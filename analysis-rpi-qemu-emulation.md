@@ -147,26 +147,84 @@ const char *nodes_to_remove[] = {
 };
 ```
 
-### 3.4 GENET Technical Specifications (from Linux kernel driver and patches)
+### 3.4 GENET Technical Specifications
 
-Based on the Linux kernel `drivers/net/ethernet/broadcom/genet/` and the unmerged QEMU patch series:
+**No public Broadcom datasheet exists.** All specifications below are derived from the Linux kernel driver (`drivers/net/ethernet/broadcom/genet/`), U-Boot driver (`drivers/net/bcmgenet.c`), the RPi device tree (`bcm2711.dtsi`), the unmerged QEMU patch series, and the [Ultibo GENET Unit](https://ultibo.org/wiki/Unit_GENET) documentation.
 
-- **Register base**: Offset `0x1580000` from peripheral low base (`0xfc000000`)
-- **Register region size**: ~64 KiB (`0x10000`)
-- **Major blocks**:
-  - **SYS** -- System control registers
-  - **EXT** -- External interface registers
-  - **INTRL2** -- Level 2 interrupt controller (two instances: default + priority)
-  - **RBUF** -- Receive buffer control
-  - **TBUF** -- Transmit buffer control
-  - **UMAC** -- UniMAC core (Ethernet MAC)
-  - **MDIO** -- PHY management interface
-  - **HFB** -- Hardware Filter Block
-  - **RDMA/TDMA** -- RX/TX DMA engines with descriptor rings
-- **DMA rings**: Multiple TX/RX descriptor rings (typically 4 TX + 16 RX + 1 each default)
-- **IRQs**: 2 lines (default + priority), mapped to GIC SPI 157/158
-- **PHY**: BCM54213PE (standard MDIO-accessible Broadcom PHY)
-- **Revision**: GENET v5 (`BCM2838_GENET_REV_MAJOR=6, MINOR=0`)
+#### Address Mapping
+
+| Property | Value |
+|---|---|
+| DTS bus address | `0x7d580000` |
+| CPU-mapped address | `0xfd580000` (via SCB: `0x7c000000` -> `0xfc000000`) |
+| QEMU peripheral offset | `0x1580000` (from peri_low base `0xfc000000`) |
+| Region size | `0x10000` (64 KiB) |
+| DT compatible | `brcm,bcm2711-genet-v5` |
+| IRQs | GIC SPI 157 (default), SPI 158 (priority) |
+| PHY | BCM54213PE via RGMII, MDIO at UMAC+0x614 |
+
+#### Register Block Layout (offsets from base)
+
+| Block | Offset | Size | Purpose |
+|---|---|---|---|
+| SYS | `0x0000` | `0x40` | System control, revision ID |
+| GR_BRIDGE | `0x0040` | `0x40` | Bridge control |
+| EXT | `0x0080` | `0x80` | External interface config |
+| INTRL2_0 | `0x0200` | `0x40` | Level 2 IRQ controller (default) |
+| INTRL2_1 | `0x0240` | `0x40` | Level 2 IRQ controller (priority) |
+| RBUF | `0x0300` | `0x200` | Receive buffer control |
+| TBUF | `0x0600` | `0x200` | Transmit buffer control |
+| UMAC | `0x0800` | `0x800` | UniMAC core (MAC engine) |
+| RDMA | `0x2000` | `0x2000` | RX DMA descriptors + ring regs + ctrl |
+| TDMA | `0x4000` | `0x2000` | TX DMA descriptors + ring regs + ctrl |
+| HFB data | `0x8000` | `0x7C00` | Hardware Filter Block data |
+| HFB regs | `0xFC00` | `0x400` | Hardware Filter Block registers |
+
+#### DMA Descriptor Format (12 bytes each)
+
+| Field | Offset | Description |
+|---|---|---|
+| LENGTH_STATUS | `+0x00` | bits[31:16]=length, bits[15:0]=status flags |
+| ADDRESS_LO | `+0x04` | Lower 32-bit DMA address |
+| ADDRESS_HI | `+0x08` | Upper 32-bit DMA address (GENET v4+) |
+
+Status flags: `DMA_OWN=0x8000`, `DMA_EOP=0x4000`, `DMA_SOP=0x2000`, `DMA_WRAP=0x1000`
+
+#### DMA Ring Architecture
+
+- **Total descriptors**: 256 per direction (shared across all rings)
+- **Total rings**: 17 (indices 0-16; ring 16 = default queue)
+- **Priority queues**: 4 TX, up to 16 RX (configurable)
+- **Ring register block**: `0x40` per ring
+- **Descriptor area**: 256 x 12 = 3072 bytes (`0xC00`)
+- **RDMA ring regs**: base `0x2C00` (= `0x2000 + 0xC00`)
+- **TDMA ring regs**: base `0x4C00` (= `0x4000 + 0xC00`)
+- **RDMA ctrl regs**: `0x2C00 + 17*0x40`
+- **TDMA ctrl regs**: `0x4C00 + 17*0x40`
+- **SCB burst size**: `0x08`
+
+#### Key Registers for Minimal Emulation
+
+| Register | Offset | Purpose |
+|---|---|---|
+| `SYS_REV_CTRL` | `0x00` | Version ID; bits[27:24] must = 6 (GENET_V5) |
+| `SYS_PORT_CTRL` | `0x04` | Port mode (`EXT_GPHY=3`) |
+| `UMAC_CMD` | `0x808` | TX/RX enable, speed, reset |
+| `UMAC_MAC0` | `0x80C` | MAC address bytes 0-3 |
+| `UMAC_MAC1` | `0x810` | MAC address bytes 4-5 |
+| `UMAC_MDIO_CMD` | `0xE14` | MDIO read/write to PHY |
+| `DMA_CTRL` | ring ctrl + `0x04` | `DMA_EN` bit 0 |
+| `INTRL2_0_*` | `0x200-0x20C` | IRQ0 status/set/clear/mask |
+| `INTRL2_1_*` | `0x240-0x24C` | IRQ1 per-queue TX/RX interrupts |
+
+#### Reference Source Code
+
+- Linux: [`drivers/net/ethernet/broadcom/genet/bcmgenet.h`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/broadcom/genet/bcmgenet.h)
+- Linux: [`drivers/net/ethernet/broadcom/genet/bcmgenet.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/broadcom/genet/bcmgenet.c)
+- U-Boot (simpler, single-queue): [`drivers/net/bcmgenet.c`](https://github.com/u-boot/u-boot/blob/master/drivers/net/bcmgenet.c)
+- Device tree: [`arch/arm/boot/dts/broadcom/bcm2711.dtsi`](https://github.com/raspberrypi/linux/blob/rpi-6.6.y/arch/arm/boot/dts/broadcom/bcm2711.dtsi)
+- BCM2711 ARM Peripherals PDF: https://datasheets.raspberrypi.com/bcm2711/bcm2711-peripherals.pdf
+- Ultibo wiki: https://ultibo.org/wiki/Unit_GENET
 
 ### 3.5 Existing QEMU Network Device Models (Reference)
 
