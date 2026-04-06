@@ -1,0 +1,5 @@
+# Upstream QEMU clone (large, fetch on demand)
+upstream-qemu/
+
+# Temporary files
+tmp/
