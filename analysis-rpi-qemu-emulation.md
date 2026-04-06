@@ -295,12 +295,24 @@ The following patches exist in the v6 series but were **not accepted into mainli
 
 As of 2026-04-06, **no v7 or later resubmission** has been found on the QEMU mailing list. The GENET patch series appears to have stalled after v6 in February 2024.
 
-### 4.5 Key Patch URLs
+### 4.5 Known Review Issues in GENET Patches
 
+Based on reviewer feedback on the v6 series:
+
+1. **Endianness**: `bcm2838_genet_read()`/`bcm2838_genet_write()` use `memcpy()` between local variables and memory, which breaks on big-endian hosts. Fix: use `ldn_he_p()`/`stn_he_p()` (or `_le_` variants).
+2. **Register macros**: Should use QEMU's `REG32`/`FIELD` infrastructure instead of custom defines.
+3. **qtest portability**: Tests read guest memory directly into host structs (endianness-dependent). Tests also fail on macOS due to weak attribute functions.
+4. **Code style**: Various style nits throughout the series.
+
+### 4.6 Key URLs
+
+- **GitLab Issue**: https://gitlab.com/qemu-project/qemu/-/issues/2547 ("Raspberry 4B Ethernet support")
 - Cover letter (v6): https://patchew.org/QEMU/20240226000259.2752893-1-sergey.kambalin@auriga.com/
 - GENET enable patch (v4): https://patchwork.kernel.org/project/qemu-devel/patch/20231203212905.1364036-33-sergey.kambalin@auriga.com/
 - GENET stub (v5): https://www.mail-archive.com/qemu-devel@nongnu.org/msg1023621.html
 - GENET RX path (v1): https://lore.kernel.org/qemu-devel/20230726132512.149618-32-sergey.kambalin@auriga.com/
+- GENET register structs (v6, part 1): https://patchwork.ozlabs.org/project/qemu-devel/patch/20240226000259.2752893-21-sergey.kambalin@auriga.com/
+- GENET MDIO (v5): https://www.mail-archive.com/qemu-devel@nongnu.org/msg1023619.html
 
 ---
 
