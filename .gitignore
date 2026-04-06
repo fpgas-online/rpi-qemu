@@ -1,5 +1,11 @@
 # Upstream QEMU clone (large, fetch on demand)
 upstream-qemu/
 
+# Extracted patch files (regenerable from resources/patches/)
+extracted-files/
+
+# Test images (large binaries, download on demand)
+test-images/
+
 # Temporary files
 tmp/
