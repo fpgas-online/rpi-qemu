@@ -5,14 +5,14 @@ Boot RPi4B in QEMU: U-Boot -> DHCP -> TFTP kernel+initrd -> Linux with internet.
 Full end-to-end demonstration of GENET Ethernet:
 1. U-Boot boots, gets DHCP from SLIRP
 2. U-Boot downloads kernel, DTB, initrd via TFTP
-3. U-Boot fixes DTB stdout-path for QEMU serial
-4. Linux boots, gets DHCP, pings gateway and 8.8.8.8
+3. Linux boots, gets DHCP, pings gateway and 8.8.8.8
 
 Usage: uv run run-raspi4b-network-test.py
 """
 
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -49,7 +49,7 @@ def setup_tftpboot():
 
 def run():
     print("=" * 60)
-    print("RPi4B QEMU Network Test: U-Boot -> TFTP -> Linux -> Internet")
+    print("RPi4B QEMU: U-Boot -> DHCP -> TFTP -> Linux -> Internet")
     print("=" * 60)
     print()
 
@@ -57,9 +57,18 @@ def run():
         [str(QEMU), "-M", "raspi4b",
          "-kernel", str(UBOOT), "-dtb", str(DTB),
          "-nic", f"user,tftp={TFTPBOOT}",
-         "-serial", "stdio", "-display", "none", "-monitor", "none"],
+         "-serial", "stdio",
+         "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
+
+    # Read output continuously in a background thread
+    output_lines = []
+    def reader():
+        for line in iter(proc.stdout.readline, ''):
+            output_lines.append(line)
+    read_thread = threading.Thread(target=reader, daemon=True)
+    read_thread.start()
 
     def send(cmd, wait=2):
         proc.stdin.write(cmd + "\n")
@@ -86,40 +95,43 @@ def run():
         send("tftpboot 0x7000000 bcm2711-rpi-4-b.dtb", 8)
         send("tftpboot 0xA000000 initrd.gz", 10)
 
-        # Phase 4: Fix DTB and boot Linux
-        # The RPi DTB sets stdout-path to serial0 (mini UART) but QEMU's
-        # -serial connects to PL011 (serial1). Fix the DTB so Linux uses
-        # the right console.
-        print("[4/5] Fixing DTB console and booting Linux...")
-        # Fix the DTB for QEMU serial console.
-        # RPi DTB has serial0=mini-UART (not connected in QEMU),
-        # serial1=PL011 (connected to -serial stdio).
-        # Swap serial0/1 aliases so Linux uses PL011 as its primary UART.
-        # Also delete the original bootargs from DTB to avoid conflict.
-        # Fix DTB for QEMU: swap serial aliases so PL011 = serial0 = ttyAMA0
-        # RPi DTB has serial0=mini-UART, serial1=PL011
-        # QEMU only connects PL011 to -serial stdio
+        # Phase 4: Boot Linux
+        print("[4/5] Booting Linux...")
         send("fdt addr 0x7000000")
-        send('fdt set /aliases serial0 "/soc/serial@7e201000"')
-        send('fdt set /aliases serial1 "/soc/serial@7e215040"')
-        send('fdt set /chosen stdout-path "serial0:115200n8"')
-        send('fdt rm /chosen bootargs')
-        send("setenv bootargs earlycon=pl011,0xfe201000 console=ttyAMA0 loglevel=4 rdinit=/init")
-        send("booti 0x8000000 0xA000000:${filesize} 0x7000000", 120)
+        send("fdt rm /chosen bootargs")
+        # Disable aux-uart so PL011 registers as ttyAMA0
+        # and set PL011 as stdout-path
+        send('fdt set /soc/serial@7e215040 status "disabled"')
+        send('fdt set /chosen stdout-path "serial1:115200n8"')
+        # PL011 = serial_hd(0) = stdio.
+        # With aux-uart disabled, PL011 registers as ttyAMA0.
+        # stdout-path points to serial1 (PL011) for earlycon auto-detect.
+        send("setenv bootargs earlycon console=ttyAMA0 loglevel=4 rdinit=/init")
+        send("booti 0x8000000 0xA000000:${filesize} 0x7000000", 1)
 
-        print("[5/5] Waiting for network test results...")
+        # Phase 5: Wait for Linux to boot and run network test
+        print("[5/5] Waiting for Linux boot + network test...")
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            time.sleep(5)
+            text = "".join(output_lines)
+            if "=== Network test complete ===" in text:
+                print("      Network test completed!")
+                time.sleep(2)
+                break
 
     except Exception as e:
         print(f"Error: {e}")
     finally:
         proc.terminate()
         try:
-            output, _ = proc.communicate(timeout=10)
+            proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-            output, _ = proc.communicate()
+            proc.wait()
 
-    # Save log
+    # Collect all output
+    output = "".join(output_lines)
     log_file = BASE / "test-images" / "full-network-test-log.txt"
     log_file.write_text(output)
 
