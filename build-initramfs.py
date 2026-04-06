@@ -31,21 +31,37 @@ ip link show
 # Bring up eth0
 echo "=== Bringing up eth0 ==="
 ip link set eth0 up
-sleep 1
+echo "Waiting for link (10s for autoneg)..."
+sleep 10
+echo "=== carrier state ==="
+cat /sys/class/net/eth0/carrier 2>&1 || echo "no carrier file"
+cat /sys/class/net/eth0/operstate 2>&1 || echo "no operstate"
+ip link show eth0
 
-# Try DHCP via udhcpc (busybox)
-echo "=== Running udhcpc ==="
-udhcpc -i eth0 -t 5 -T 3 -n -q 2>&1 || echo "DHCP failed"
-
-echo "=== ip addr ==="
+# Force IP even without carrier
+echo "=== Setting IP manually ==="
+ip addr add 10.0.2.15/24 dev eth0
+ip route add default via 10.0.2.2
 ip addr show eth0
+
+echo "=== All interrupts ==="
+cat /proc/interrupts
+echo "=== dmesg genet ==="
+dmesg 2>&1 | grep -i "genet\|irq.*157\|irq.*158\|irq.*189\|irq.*190" | tail -10
 
 # Try ping
 echo "=== Pinging 10.0.2.2 (QEMU gateway) ==="
-ping -c 3 -W 2 10.0.2.2 2>&1 || echo "Ping failed"
+ping -c 3 -W 3 10.0.2.2 2>&1 || echo "Ping failed"
 
-echo "=== Pinging 10.0.2.3 (QEMU DNS) ==="
-ping -c 2 -W 2 10.0.2.3 2>&1 || echo "Ping DNS failed"
+echo "=== Interrupts after ping ==="
+grep -i genet /proc/interrupts 2>&1 || echo "no genet interrupts"
+
+# Also try DHCP
+echo "=== Running udhcpc ==="
+udhcpc -i eth0 -t 5 -T 3 -n -q 2>&1 || echo "DHCP failed"
+
+echo "=== ip addr final ==="
+ip addr show eth0
 
 echo "=== Network test complete ==="
 
