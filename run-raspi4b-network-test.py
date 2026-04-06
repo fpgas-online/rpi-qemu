@@ -62,11 +62,15 @@ def run():
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, text=True)
 
-    # Read output continuously in a background thread
-    output_lines = []
+    # Read output continuously in a background thread using read(1)
+    # to avoid blocking on incomplete lines from earlycon
+    output_chars = []
     def reader():
-        for line in iter(proc.stdout.readline, ''):
-            output_lines.append(line)
+        while True:
+            ch = proc.stdout.read(1)
+            if not ch:
+                break
+            output_chars.append(ch)
     read_thread = threading.Thread(target=reader, daemon=True)
     read_thread.start()
 
@@ -91,13 +95,14 @@ def run():
 
         # Phase 3: TFTP
         print("[3/5] TFTP: kernel + DTB + initrd...")
-        send("tftpboot 0x8000000 kernel8.img", 12)
-        send("tftpboot 0x7000000 bcm2711-rpi-4-b.dtb", 8)
-        send("tftpboot 0xA000000 initrd.gz", 10)
+        # Load addresses must not overlap with decompressed kernel (0x0-0x2000000)
+        send("tftpboot 0x10000000 Image", 20)
+        send("tftpboot 0x0f000000 bcm2711-rpi-4-b.dtb", 8)
+        send("tftpboot 0x12000000 initrd.gz", 10)
 
         # Phase 4: Boot Linux
         print("[4/5] Booting Linux...")
-        send("fdt addr 0x7000000")
+        send("fdt addr 0x0f000000")
         send("fdt rm /chosen bootargs")
         # Disable aux-uart so PL011 registers as ttyAMA0
         # and set PL011 as stdout-path
@@ -107,14 +112,14 @@ def run():
         # With aux-uart disabled, PL011 registers as ttyAMA0.
         # stdout-path points to serial1 (PL011) for earlycon auto-detect.
         send("setenv bootargs earlycon console=ttyAMA0 loglevel=4 rdinit=/init")
-        send("booti 0x8000000 0xA000000:${filesize} 0x7000000", 1)
+        send("booti 0x10000000 0x12000000:${filesize} 0x0f000000", 1)
 
         # Phase 5: Wait for Linux to boot and run network test
         print("[5/5] Waiting for Linux boot + network test...")
         deadline = time.time() + 180
         while time.time() < deadline:
             time.sleep(5)
-            text = "".join(output_lines)
+            text = "".join(output_chars)
             if "=== Network test complete ===" in text:
                 print("      Network test completed!")
                 time.sleep(2)
@@ -131,7 +136,7 @@ def run():
             proc.wait()
 
     # Collect all output
-    output = "".join(output_lines)
+    output = "".join(output_chars)
     log_file = BASE / "test-images" / "full-network-test-log.txt"
     log_file.write_text(output)
 
@@ -143,7 +148,7 @@ def run():
 
     checks = [
         ("U-Boot DHCP",     "DHCP client bound"),
-        ("TFTP kernel",     "Bytes transferred = 1036"),
+        ("TFTP kernel",     "Bytes transferred = 2"),
         ("TFTP DTB",        "Bytes transferred = 563"),
         ("TFTP initrd",     "Bytes transferred = 385"),
         ("Linux boot",      "Booting Linux"),
