@@ -1,0 +1,3 @@
+# Files produced by the build but not needed in our packages
+usr/include/qemu-plugin.h
+usr/lib/qemu-rpi/qemu-bridge-helper
