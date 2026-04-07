@@ -124,7 +124,8 @@ jobs:
             --disable-virglrenderer \
             --disable-spice \
             --disable-xen \
-            --disable-werror
+            --disable-werror \
+            --firmwarepath=
           ninja -j$(nproc)
 
           echo "=== Static binary ==="

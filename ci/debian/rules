@@ -46,7 +46,8 @@ CONFIGURE_OPTS = \
 	--disable-numa \
 	--disable-smartcard \
 	--disable-curses \
-	--disable-libssh
+	--disable-libssh \
+	--firmwarepath=
 
 %:
 	dh $@
