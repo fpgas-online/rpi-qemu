@@ -1,0 +1,74 @@
+#!/usr/bin/make -f
+SHELL = /bin/sh -e
+
+# Parallel build support
+MAKEFLAGS += $(subst parallel=,-j,$(filter parallel=%,${DEB_BUILD_OPTIONS}))
+NUMJOBS := $(lastword 1 $(subst -j,,$(filter -j%,${MAKEFLAGS})))
+
+NINJA = ninja $(if $(filter terse, ${DEB_BUILD_OPTIONS}),,-v) -j${NUMJOBS}
+
+# Install paths - use qemu-rpi prefix to avoid conflicts with Debian qemu
+prefix = /usr
+bindir = $(prefix)/bin
+datadir = $(prefix)/share/qemu-rpi
+libdir = $(prefix)/lib/qemu-rpi
+
+BUILDDIR = build-rpi
+
+CONFIGURE_OPTS = \
+	--prefix=$(prefix) \
+	--datadir=$(datadir) \
+	--libdir=$(libdir) \
+	--libexecdir=$(libdir) \
+	--bindir=$(bindir) \
+	--target-list=aarch64-softmmu \
+	--with-pkgversion="Debian RPi $(shell dpkg-parsechangelog -SVersion)" \
+	--enable-slirp \
+	--enable-fdt \
+	--enable-capstone \
+	--disable-werror \
+	--disable-docs \
+	--disable-gtk \
+	--disable-sdl \
+	--disable-opengl \
+	--disable-virglrenderer \
+	--disable-spice \
+	--disable-xen \
+	--disable-brlapi \
+	--disable-vnc-sasl \
+	--disable-rdma \
+	--disable-vde \
+	--disable-netmap \
+	--disable-linux-aio \
+	--disable-linux-io-uring \
+	--disable-rbd \
+	--disable-glusterfs \
+	--disable-numa \
+	--disable-smartcard \
+	--disable-curses \
+	--disable-libssh
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	mkdir -p $(BUILDDIR)
+	cd $(BUILDDIR) && ../configure $(CONFIGURE_OPTS)
+
+override_dh_auto_build:
+	$(NINJA) -C $(BUILDDIR)
+
+override_dh_auto_test:
+	# Skip tests for now
+
+override_dh_auto_install:
+	DESTDIR=$(CURDIR)/debian/tmp $(NINJA) -C $(BUILDDIR) install
+	# Rename the binary to include rpi prefix
+	mv debian/tmp$(bindir)/qemu-system-aarch64 \
+	   debian/tmp$(bindir)/qemu-rpi-system-aarch64
+
+override_dh_install:
+	dh_install
+
+override_dh_auto_clean:
+	rm -rf $(BUILDDIR)

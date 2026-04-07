@@ -1,0 +1,33 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: QEMU
+Upstream-Contact: qemu-devel@nongnu.org
+Source: https://www.qemu.org/
+
+Files: *
+Copyright: 2003-2026 Fabrice Bellard and the QEMU Project developers
+License: GPL-2+
+
+Files: debian/*
+Copyright: 2026 Tim Ansell <mithro@mithis.com>
+License: GPL-2+
+
+Files: hw/net/bcm2838_genet.c
+ include/hw/net/bcm2838_genet.h
+ hw/arm/bcm2838_pcie.c
+ include/hw/arm/bcm2838_pcie.h
+ hw/misc/bcm2838_rng200.c
+ include/hw/misc/bcm2838_rng200.h
+ hw/misc/bcm2838_thermal.c
+ include/hw/misc/bcm2838_thermal.h
+Copyright: 2023-2024 Sergey Kambalin <sergey.kambalin@gmail.com>
+           2026 Tim Ansell <mithro@mithis.com> (v11 API port)
+License: GPL-2+
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation; either version 2 of the License, or
+ (at your option) any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License
+ version 2 can be found in "/usr/share/common-licenses/GPL-2".

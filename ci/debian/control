@@ -1,0 +1,44 @@
+Source: qemu-rpi
+Section: otherosfs
+Priority: optional
+Maintainer: Tim Ansell <mithro@mithis.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ meson (>> 1.5.0~),
+ ninja-build,
+ python3:any (>> 3.11),
+ python3-venv:any,
+ pkgconf,
+ libglib2.0-dev,
+ libpixman-1-dev,
+ libslirp-dev,
+ libcapstone-dev,
+ libfdt-dev,
+ zlib1g-dev,
+ libzstd-dev,
+Standards-Version: 4.7.2
+Homepage: https://github.com/fpgas-online/rpi-qemu
+Vcs-Git: https://github.com/fpgas-online/rpi-qemu.git
+Vcs-Browser: https://github.com/fpgas-online/rpi-qemu
+
+Package: qemu-rpi-system-arm
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends},
+ qemu-rpi-system-data (= ${source:Version}),
+Description: QEMU with Raspberry Pi 4B GENET Ethernet support
+ Modified QEMU emulator for ARM systems with BCM2838 GENET Ethernet
+ controller support for Raspberry Pi 4 Model B emulation.
+ .
+ This package provides qemu-rpi-system-aarch64, which can be installed
+ alongside the standard Debian qemu-system-arm package.
+ .
+ Includes: GENET Ethernet (1Gbps), PCIe Root Complex, RNG200, Thermal.
+
+Package: qemu-rpi-system-data
+Architecture: all
+Depends: ${misc:Depends}
+Description: QEMU RPi data files (firmware, keymaps, etc.)
+ Data files needed by qemu-rpi-system-arm.
+ .
+ Contains firmware blobs, keymaps, and other architecture-independent
+ files for the QEMU RPi build.

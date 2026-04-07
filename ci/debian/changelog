@@ -1,0 +1,15 @@
+qemu-rpi (1:11.0.0~rc2+ds-2+rpi1) trixie; urgency=medium
+
+  * Custom QEMU build with Raspberry Pi 4B GENET Ethernet support.
+  * Based on Debian experimental qemu 1:11.0.0~rc2+ds-2.
+  * Added 16 patches from Kambalin v6 series ported to QEMU v11:
+    - BCM2838 GENET Ethernet controller (bidirectional DMA networking)
+    - BCM2838 PCIe Root Complex
+    - BCM2838 RNG200 hardware RNG
+    - BCM2838 thermal sensor
+    - PL011 UART fix for U-Boot handoff
+  * Packages renamed to qemu-rpi-* for side-by-side installation
+    with standard Debian QEMU packages.
+  * Only builds aarch64-softmmu target.
+
+ -- Tim Ansell <mithro@mithis.com>  Mon, 07 Apr 2026 12:00:00 +0930

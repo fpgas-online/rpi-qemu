@@ -21,6 +21,7 @@ Prerequisites:
 Usage: uv run run-rpi-boot-test.py
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,15 @@ import time
 from pathlib import Path
 
 BASE = Path(__file__).parent.resolve()
-QEMU = BASE / "upstream-qemu" / "build" / "qemu-system-aarch64"
+# QEMU binary: prefer QEMU_OVERRIDE env var, then local build, then APT-installed
+_qemu_override = os.environ.get("QEMU_OVERRIDE")
+if _qemu_override:
+    QEMU = Path(_qemu_override)
+elif (BASE / "upstream-qemu" / "build" / "qemu-system-aarch64").exists():
+    QEMU = BASE / "upstream-qemu" / "build" / "qemu-system-aarch64"
+else:
+    QEMU = Path(shutil.which("qemu-rpi-system-aarch64") or
+                "qemu-rpi-system-aarch64")
 UBOOT = BASE / "test-images" / "u-boot" / "u-boot.bin"
 DTB = BASE / "test-images" / "bcm2711-rpi-4-b.dtb"
 INITRD = BASE / "test-images" / "test-initramfs.cpio.gz"

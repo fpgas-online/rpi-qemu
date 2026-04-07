@@ -1,0 +1,319 @@
+name: Build QEMU RPi Packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ci/qemu-patches/**'
+      - 'ci/debian/**'
+      - 'ci/build-debs.py'
+      - '.github/workflows/build-qemu-packages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: build-qemu-packages
+  cancel-in-progress: true
+
+jobs:
+
+  build-debs:
+    name: Build Debian packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get package version
+        id: version
+        run: |
+          version=$(dpkg-parsechangelog -l ci/debian/changelog -S Version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Package version: $version"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dpkg-dev devscripts debhelper \
+            meson ninja-build pkgconf \
+            python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev \
+            libslirp-dev libcapstone-dev \
+            libfdt-dev zlib1g-dev libzstd-dev \
+            wget xz-utils
+
+      - name: Cache upstream tarball
+        id: cache-tarball
+        uses: actions/cache@v4
+        with:
+          path: tmp/deb-build/qemu-rpi_11.0.0~rc2+ds.orig.tar.xz
+          key: qemu-orig-tarball-11.0.0-rc2
+
+      - name: Build Debian packages
+        run: python3 ci/build-debs.py --output-dir tmp/deb-output
+
+      - name: List built packages
+        run: ls -lh tmp/deb-output/
+
+      - name: Upload deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-rpi-debs
+          path: tmp/deb-output/
+          retention-days: 90
+
+  build-static:
+    name: Build static binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc g++ meson ninja-build pkgconf python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev libslirp-dev \
+            libcapstone-dev libfdt-dev zlib1g-dev libzstd-dev \
+            wget xz-utils
+
+      - name: Cache QEMU source
+        id: cache-src
+        uses: actions/cache@v4
+        with:
+          path: tmp/qemu-static-src
+          key: qemu-static-src-11.0.0-rc2-${{ hashFiles('ci/qemu-patches/*.patch') }}
+
+      - name: Download and patch QEMU
+        if: steps.cache-src.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tmp/qemu-static-src
+          wget -q -O tmp/qemu-static.tar.xz \
+            "https://deb.debian.org/debian/pool/main/q/qemu/qemu_11.0.0~rc2+ds.orig.tar.xz"
+          tar xf tmp/qemu-static.tar.xz -C tmp/qemu-static-src --strip-components=1
+          rm tmp/qemu-static.tar.xz
+
+          cd tmp/qemu-static-src
+          for p in ../../ci/qemu-patches/*.patch; do
+            echo "Applying: $(basename $p)"
+            git init -q . 2>/dev/null || true
+            git apply "$p"
+          done
+
+      - name: Build static QEMU
+        run: |
+          cd tmp/qemu-static-src
+          mkdir -p build && cd build
+          ../configure \
+            --target-list=aarch64-softmmu \
+            --static \
+            --enable-slirp \
+            --disable-docs \
+            --disable-gtk \
+            --disable-sdl \
+            --disable-opengl \
+            --disable-virglrenderer \
+            --disable-spice \
+            --disable-xen \
+            --disable-werror
+          ninja -j$(nproc)
+
+          echo "=== Static binary ==="
+          ls -lh qemu-system-aarch64
+          file qemu-system-aarch64
+          ldd qemu-system-aarch64 2>&1 || echo "(static - no dynamic deps)"
+
+      - name: Package static binary
+        run: |
+          mkdir -p tmp/static-output
+          cp tmp/qemu-static-src/build/qemu-system-aarch64 \
+             tmp/static-output/qemu-rpi-system-aarch64-static
+          chmod +x tmp/static-output/qemu-rpi-system-aarch64-static
+          tar czf tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz \
+            -C tmp/static-output qemu-rpi-system-aarch64-static
+
+      - name: Upload static binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-rpi-static
+          path: |
+            tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz
+          retention-days: 90
+
+  publish-apt-repo:
+    name: Publish APT repository
+    needs: [build-debs]
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download deb artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-debs
+          path: tmp/debs/
+
+      - name: List downloaded artifacts
+        run: ls -lh tmp/debs/
+
+      - name: Import GPG key
+        if: env.APT_GPG_PRIVATE_KEY != ''
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format long | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
+          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
+          echo "GPG key imported: $GPG_KEY_ID"
+
+      - name: Build APT repository
+        run: |
+          REPO_DIR=tmp/apt-repo
+          mkdir -p $REPO_DIR/pool/main
+          mkdir -p $REPO_DIR/dists/trixie/main/binary-amd64
+          mkdir -p $REPO_DIR/dists/trixie/main/source
+
+          # Copy .deb files to pool
+          cp tmp/debs/*.deb $REPO_DIR/pool/main/ 2>/dev/null || true
+
+          # Copy source files to pool
+          cp tmp/debs/*.dsc $REPO_DIR/pool/main/ 2>/dev/null || true
+          cp tmp/debs/*.tar.xz $REPO_DIR/pool/main/ 2>/dev/null || true
+
+          # Generate Packages file
+          cd $REPO_DIR
+          dpkg-scanpackages --multiversion pool/main > dists/trixie/main/binary-amd64/Packages
+          gzip -9c dists/trixie/main/binary-amd64/Packages > dists/trixie/main/binary-amd64/Packages.gz
+
+          # Generate Sources file
+          dpkg-scansources pool/main > dists/trixie/main/source/Sources
+          gzip -9c dists/trixie/main/source/Sources > dists/trixie/main/source/Sources.gz
+
+          # Generate Release file
+          cd dists/trixie
+          cat > Release <<EOF
+          Origin: fpgas-online
+          Label: QEMU RPi
+          Suite: trixie
+          Codename: trixie
+          Architectures: amd64
+          Components: main
+          Description: QEMU with Raspberry Pi 4B GENET Ethernet support
+          Date: $(date -Ru)
+          EOF
+
+          # Add checksums
+          {
+            echo "MD5Sum:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz \
+                     main/source/Sources main/source/Sources.gz; do
+              [ -f "$f" ] && echo " $(md5sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
+            done
+            echo "SHA256:"
+            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz \
+                     main/source/Sources main/source/Sources.gz; do
+              [ -f "$f" ] && echo " $(sha256sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
+            done
+          } >> Release
+
+          # Sign if GPG key is available
+          if [ -n "$GPG_KEY_ID" ]; then
+            gpg --batch --yes -abs -o Release.gpg Release
+            gpg --batch --yes --clearsign -o InRelease Release
+            echo "APT repo signed with GPG key $GPG_KEY_ID"
+          else
+            echo "WARNING: No GPG key - APT repo is unsigned"
+            echo "Set APT_GPG_PRIVATE_KEY secret to enable signing"
+          fi
+
+          cd ../..
+
+      - name: Create repo index page
+        run: |
+          cat > tmp/apt-repo/index.html <<'HTMLEOF'
+          <!DOCTYPE html>
+          <html>
+          <head><title>QEMU RPi APT Repository</title></head>
+          <body>
+          <h1>QEMU RPi APT Repository</h1>
+          <p>QEMU with Raspberry Pi 4B GENET Ethernet support.</p>
+          <h2>Usage</h2>
+          <pre>
+          # Add the repository
+          echo "deb https://fpgas-online.github.io/rpi-qemu trixie main" | \
+            sudo tee /etc/apt/sources.list.d/qemu-rpi.list
+
+          # Import the signing key (if signed)
+          # curl -fsSL https://fpgas-online.github.io/rpi-qemu/repo-key.gpg | \
+          #   sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/qemu-rpi.gpg
+
+          # Install
+          sudo apt-get update
+          sudo apt-get install qemu-rpi-system-arm
+          </pre>
+          <h2>Packages</h2>
+          <ul>
+          <li><b>qemu-rpi-system-arm</b> - QEMU aarch64 emulator with RPi4B GENET</li>
+          <li><b>qemu-rpi-system-data</b> - Data files for qemu-rpi</li>
+          </ul>
+          <p>Source: <a href="https://github.com/fpgas-online/rpi-qemu">github.com/fpgas-online/rpi-qemu</a></p>
+          </body>
+          </html>
+          HTMLEOF
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: tmp/apt-repo
+          keep_files: false
+          force_orphan: true
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-debs, build-static]
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: qemu-rpi-${{ needs.build-debs.outputs.version }}
+          name: "QEMU RPi ${{ needs.build-debs.outputs.version }}"
+          body: |
+            QEMU with Raspberry Pi 4B GENET Ethernet support.
+
+            Based on QEMU v11.0.0-rc2 + 16 patches (Kambalin v6 GENET port).
+
+            **Install via APT:**
+            ```
+            echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
+              sudo tee /etc/apt/sources.list.d/qemu-rpi.list
+            sudo apt-get update && sudo apt-get install qemu-rpi-system-arm
+            ```
+
+            **Or download the static binary** (no dependencies needed).
+          files: |
+            artifacts/qemu-rpi-debs/*.deb
+            artifacts/qemu-rpi-debs/*.dsc
+            artifacts/qemu-rpi-static/*.tar.gz
+          draft: false
+          prerelease: false
+          make_latest: true
