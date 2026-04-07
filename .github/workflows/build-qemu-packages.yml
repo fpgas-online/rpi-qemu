@@ -116,10 +116,9 @@ jobs:
         run: |
           cd tmp/qemu-static-src
           mkdir -p build && cd build
-          ../configure \
+          MESON=$(which meson) ../configure \
             --target-list=aarch64-softmmu \
             --static \
-            --meson=meson \
             --enable-slirp \
             --disable-docs \
             --disable-gtk \
