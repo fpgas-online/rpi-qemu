@@ -23,40 +23,39 @@ jobs:
 
   build-debs:
     name: Build Debian packages
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container: debian:trixie
     timeout-minutes: 60
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Get package version
         id: version
         run: |
+          apt-get install -y dpkg-dev
           version=$(dpkg-parsechangelog -l ci/debian/changelog -S Version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Package version: $version"
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             build-essential \
             dpkg-dev devscripts debhelper \
             meson ninja-build pkgconf \
-            python3 python3-venv python3-setuptools \
+            python3 python3-venv python3-setuptools python3-pip \
             libglib2.0-dev libpixman-1-dev \
             libslirp-dev libcapstone-dev \
             libfdt-dev zlib1g-dev libzstd-dev \
             wget xz-utils
-
-      - name: Cache upstream tarball
-        id: cache-tarball
-        uses: actions/cache@v4
-        with:
-          path: tmp/deb-build/qemu-rpi_11.0.0~rc2+ds.orig.tar.xz
-          key: qemu-orig-tarball-11.0.0-rc2
 
       - name: Build Debian packages
         run: python3 ci/build-debs.py --output-dir tmp/deb-output
@@ -73,31 +72,29 @@ jobs:
 
   build-static:
     name: Build static binary
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container: debian:trixie
     timeout-minutes: 45
     steps:
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt-get install -y --no-install-recommends \
             build-essential \
-            meson ninja-build pkgconf python3 python3-venv python3-setuptools \
+            meson ninja-build pkgconf \
+            python3 python3-venv python3-setuptools python3-pip \
             libglib2.0-dev libpixman-1-dev libslirp-dev \
             libcapstone-dev libfdt-dev zlib1g-dev libzstd-dev \
             wget xz-utils
 
-      - name: Cache QEMU source
-        id: cache-src
-        uses: actions/cache@v4
-        with:
-          path: tmp/qemu-static-src
-          key: qemu-static-src-11.0.0-rc2-${{ hashFiles('ci/qemu-patches/*.patch') }}
-
       - name: Download and patch QEMU
-        if: steps.cache-src.outputs.cache-hit != 'true'
         run: |
           mkdir -p tmp/qemu-static-src
           wget -q -O tmp/qemu-static.tar.xz \
@@ -116,7 +113,7 @@ jobs:
         run: |
           cd tmp/qemu-static-src
           mkdir -p build && cd build
-          MESON=$(which meson) ../configure \
+          ../configure \
             --target-list=aarch64-softmmu \
             --static \
             --enable-slirp \
@@ -155,7 +152,7 @@ jobs:
   publish-apt-repo:
     name: Publish APT repository
     needs: [build-debs]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Checkout
@@ -286,7 +283,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [build-debs, build-static]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Download all artifacts

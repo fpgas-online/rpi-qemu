@@ -2,8 +2,10 @@
 """
 Build Debian packages for QEMU with RPi GENET Ethernet support.
 
-Downloads the QEMU v11.0.0-rc2 upstream tarball (same as Debian experimental),
+Downloads the Debian experimental QEMU v11.0.0-rc2 orig tarball,
 applies our debian/ packaging with GENET patches, and builds .deb packages.
+
+Must be run on Debian trixie (or compatible) to satisfy build dependencies.
 
 Produces:
   - qemu-rpi-system-arm_*.deb     (binary: qemu-rpi-system-aarch64)
@@ -26,6 +28,7 @@ from pathlib import Path
 BASE = Path(__file__).parent.resolve()
 REPO_ROOT = BASE.parent
 
+# Debian experimental's QEMU orig tarball - works correctly on Debian trixie
 ORIG_TARBALL_URL = (
     "https://deb.debian.org/debian/pool/main/q/qemu/"
     "qemu_11.0.0~rc2+ds.orig.tar.xz"
@@ -99,7 +102,7 @@ def main():
     env = os.environ.copy()
     env["DEB_BUILD_OPTIONS"] = f"parallel={os.cpu_count() or 4} nocheck"
 
-    # -d: skip dependency checking (we install deps ourselves)
+    # -d: skip dependency checking (deps installed by container/workflow)
     run(["dpkg-buildpackage", "-us", "-uc", "-d", "-b"],
         cwd=source_dir, check=True)
 
@@ -118,9 +121,9 @@ def main():
             print(f"  {f.name} ({size_mb:.1f} MB)")
 
     # Also copy the orig tarball
-    dst = output_dir / ORIG_TARBALL_NAME
-    if not dst.exists():
-        shutil.copy2(orig_tarball, dst)
+    orig_dst = output_dir / ORIG_TARBALL_NAME
+    if not orig_dst.exists():
+        shutil.copy2(orig_tarball, orig_dst)
 
     print(f"\n{'=' * 60}")
     print(f"Output: {output_dir}")
