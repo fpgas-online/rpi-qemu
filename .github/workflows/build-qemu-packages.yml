@@ -289,6 +289,7 @@ jobs:
     name: Create GitHub Release
     needs: [build-debs]
     runs-on: ubuntu-latest
+    continue-on-error: true
     if: github.ref == 'refs/heads/main'
     steps:
       - name: Download all artifacts
@@ -299,8 +300,8 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: qemu-rpi-${{ needs.build-debs.outputs.version }}
-          name: "QEMU RPi ${{ needs.build-debs.outputs.version }}"
+          tag_name: v0.1
+          name: "QEMU RPi v11.0.0-rc2+rpi1"
           body: |
             QEMU with Raspberry Pi 4B GENET Ethernet support.
 
