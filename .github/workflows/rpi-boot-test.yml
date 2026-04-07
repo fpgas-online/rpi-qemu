@@ -1,21 +1,17 @@
 name: RPi QEMU Boot Test
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
   workflow_run:
     workflows: ["Build QEMU RPi Packages"]
     types: [completed]
+  workflow_dispatch:
 
 jobs:
   boot-test:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Don't run on workflow_run if the build failed
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Only run if the package build succeeded
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
     steps:
       - name: Checkout
