@@ -21,14 +21,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install QEMU from APT repo (if available)
-        id: apt-install
-        continue-on-error: true
+      - name: Install QEMU from APT repo
         run: |
           echo "=== Adding QEMU RPi APT repository ==="
           echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
             sudo tee /etc/apt/sources.list.d/qemu-rpi.list
-          sudo apt-get update 2>&1 | tail -5
+          sudo apt-get update
 
           echo "=== Installing qemu-rpi-system-arm ==="
           sudo apt-get install -y qemu-rpi-system-arm
@@ -36,49 +34,6 @@ jobs:
           echo "=== Installed ==="
           which qemu-rpi-system-aarch64
           qemu-rpi-system-aarch64 --version
-
-      - name: Install build dependencies (QEMU from source fallback)
-        if: steps.apt-install.outcome == 'failure'
-        run: |
-          echo "APT repo not available, building QEMU from source"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libglib2.0-dev libpixman-1-dev libslirp-dev \
-            ninja-build meson pkg-config python3 python3-venv
-
-      - name: Cache QEMU build (source fallback)
-        if: steps.apt-install.outcome == 'failure'
-        id: cache-qemu
-        uses: actions/cache@v4
-        with:
-          path: upstream-qemu
-          key: qemu-v11.0.0-rc2-genet-${{ hashFiles('ci/qemu-patches/*.patch') }}
-
-      - name: Build QEMU from source (fallback)
-        if: steps.apt-install.outcome == 'failure' && steps.cache-qemu.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth=1 --branch v11.0.0-rc2 \
-            https://gitlab.com/qemu-project/qemu.git upstream-qemu
-          cd upstream-qemu
-          for patch in ../ci/qemu-patches/*.patch; do
-            git apply "$patch"
-          done
-          mkdir -p build && cd build
-          ../configure --target-list=aarch64-softmmu
-          ninja -j$(nproc)
-
-      - name: Set QEMU binary path
-        run: |
-          if command -v qemu-rpi-system-aarch64 >/dev/null 2>&1; then
-            echo "QEMU_BIN=$(which qemu-rpi-system-aarch64)" >> "$GITHUB_ENV"
-            echo "Using APT-installed QEMU"
-          elif [ -f upstream-qemu/build/qemu-system-aarch64 ]; then
-            echo "QEMU_BIN=$PWD/upstream-qemu/build/qemu-system-aarch64" >> "$GITHUB_ENV"
-            echo "Using source-built QEMU"
-          else
-            echo "ERROR: No QEMU binary found!"
-            exit 1
-          fi
 
       - name: Install remaining dependencies
         run: |
@@ -150,9 +105,7 @@ jobs:
       - name: Run RPi boot test
         run: |
           echo "=== Running single-instance boot test ==="
-          echo "QEMU binary: $QEMU_BIN"
-          # Override the QEMU path if using APT-installed version
-          QEMU_OVERRIDE=$QEMU_BIN python3 run-rpi-boot-test.py
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-boot-test.py
 
       - name: Upload test log on failure
         if: failure()
