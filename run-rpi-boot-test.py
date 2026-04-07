@@ -32,7 +32,6 @@ BASE = Path(__file__).parent.resolve()
 QEMU = BASE / "upstream-qemu" / "build" / "qemu-system-aarch64"
 UBOOT = BASE / "test-images" / "u-boot" / "u-boot.bin"
 DTB = BASE / "test-images" / "bcm2711-rpi-4-b.dtb"
-KERNEL = BASE / "test-images" / "kernel8.img"
 INITRD = BASE / "test-images" / "test-initramfs.cpio.gz"
 TFTPBOOT = BASE / "test-images" / "tftpboot"
 
@@ -52,7 +51,7 @@ def check_prerequisites():
         ("QEMU (custom build with GENET)", QEMU),
         ("U-Boot (rpi_4_qemu_defconfig)", UBOOT),
         ("DTB", DTB),
-        ("Kernel (kernel8.img)", KERNEL),
+        ("Uncompressed kernel Image", TFTPBOOT / "Image"),
         ("Initramfs", INITRD),
     ]:
         if not path.exists():
@@ -68,15 +67,10 @@ def setup_tftpboot():
     """Populate the TFTP boot directory with required files."""
     TFTPBOOT.mkdir(parents=True, exist_ok=True)
 
-    # Check for uncompressed Image (preferred over compressed kernel8.img)
-    image_path = TFTPBOOT / "Image"
-    if not image_path.exists():
-        # Try to find an uncompressed Image elsewhere
-        alt_image = BASE / "test-images" / "tftpboot" / "Image"
-        if not alt_image.exists():
-            print("ERROR: Uncompressed Image not found in tftpboot/")
-            print("  The kernel must be an uncompressed ARM64 Image for booti")
-            return False
+    if not (TFTPBOOT / "Image").exists():
+        print("ERROR: Uncompressed Image not found in tftpboot/")
+        print("  The kernel must be an uncompressed ARM64 Image for booti")
+        return False
 
     for src, name in [
         (DTB, "bcm2711-rpi-4-b.dtb"),
@@ -149,16 +143,24 @@ def run_test():
 
         # === Phase 2: DHCP + TFTP ===
         print("--- Phase 2: DHCP + TFTP ---")
-        send("dhcp", 10)
-        send(f"tftpboot 0x{KERNEL_ADDR:x} Image", 15)
-        send(f"tftpboot 0x{DTB_ADDR:x} bcm2711-rpi-4-b.dtb", 8)
-        send(f"tftpboot 0x{INITRD_ADDR:x} initrd.gz", 10)
+        send("dhcp", 3)
+        wait_for("DHCP client bound", timeout=15, label="DHCP")
+
+        send(f"tftpboot 0x{KERNEL_ADDR:x} Image", 3)
+        wait_for("Bytes transferred", timeout=30, label="TFTP kernel")
+
+        send(f"tftpboot 0x{DTB_ADDR:x} bcm2711-rpi-4-b.dtb", 3)
+        wait_for("Bytes transferred", timeout=15, label="TFTP DTB")
+
+        send(f"tftpboot 0x{INITRD_ADDR:x} initrd.gz", 3)
+        wait_for("Bytes transferred", timeout=15, label="TFTP initrd")
 
         # === Phase 3: FDT setup + booti ===
         print("--- Phase 3: FDT setup + booti ---")
         send(f"fdt addr 0x{DTB_ADDR:x}", 2)
         send("fdt resize 8192", 2)
         send(f'setenv bootargs "{BOOTARGS}"', 2)
+        # Note: ${filesize} is set by the LAST tftpboot (initrd.gz)
         send(f"booti 0x{KERNEL_ADDR:x} 0x{INITRD_ADDR:x}:${{filesize}} 0x{DTB_ADDR:x}", 3)
 
         # === Phase 4: Wait for Linux to complete network tests ===
@@ -183,9 +185,7 @@ def run_test():
 
     checks = [
         ("U-Boot DHCP",         "DHCP client bound"),
-        ("TFTP kernel",         "Bytes transferred = 287"),  # 28.7 MB Image
-        ("TFTP DTB",            "Bytes transferred = 563"),  # 56 KB DTB
-        ("TFTP initrd",         "Bytes transferred = 385"),  # 3.8 MB initrd
+        ("TFTP transfers",      "Bytes transferred"),
         ("booti starts kernel", "Starting kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),

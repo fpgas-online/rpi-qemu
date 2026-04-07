@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-BASE = Path("/home/tim/github/fpgas-online/rpi-qemu/test-images")
+BASE = Path(__file__).parent.resolve() / "test-images"
 ALPINE_TAR = BASE / "alpine-minirootfs.tar.gz"
 ROOTFS_DIR = BASE / "initramfs-root"
 OUTPUT = BASE / "test-initramfs.cpio.gz"
@@ -63,12 +63,16 @@ nslookup www.google.com 2>&1 || echo "DNS resolution failed"
 export LD_LIBRARY_PATH=/usr/lib:/lib
 export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Test HTTPS fetch
+# Set system clock so TLS certificate verification works
+# QEMU's RTC may not be configured, leaving the system at epoch
+date -s "2026-04-07 12:00:00" 2>&1 || true
+
+# Test HTTPS fetch (with proper certificate verification)
 echo "=== Fetching https://www.google.com ==="
-# Note: certificate verification may fail in QEMU due to system time
-# not matching certificate validity window. The TLS connection itself
-# (encryption, handshake) still works correctly.
-wget --no-check-certificate -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || echo "HTTPS fetch: FAILED"
+wget -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || {
+    echo "Certificate verification failed, retrying without verification..."
+    wget --no-check-certificate -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || echo "HTTPS fetch: FAILED"
+}
 
 # Show dmesg for GENET
 echo "=== dmesg genet ==="
@@ -76,8 +80,8 @@ dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5
 
 echo "=== Network test complete ==="
 
-# Drop to shell
-exec /bin/sh
+# Shutdown cleanly so QEMU exits
+poweroff -f 2>&1 || exec /bin/sh
 """
 
 def main():
