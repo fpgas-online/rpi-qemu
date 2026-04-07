@@ -24,7 +24,7 @@ def main():
     dtb_addr    = 0x0f000000
     initrd_addr = 0x12000000
     bootargs = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA1 loglevel=7 rdinit=/init"
-    post_booti_wait = 60
+    post_booti_wait = 120
 
     serial2_log = LOG_DIR / "quick-serial2.log"
     cpu_log = LOG_DIR / "quick-cpu.log"
@@ -40,7 +40,8 @@ def main():
          "-nic", f"user,tftp={TFTPBOOT}",
          "-serial", "stdio",
          "-serial", f"file:{serial2_log}",
-         "-display", "none", "-monitor", "none"],
+         "-display", "none", "-monitor", "none",
+         ],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True)
 
@@ -114,9 +115,6 @@ def main():
         # FDT setup
         send(f"fdt addr 0x{dtb_addr:x}", 2)
         send("fdt resize 8192", 2)
-
-        # Skip board-specific FDT fixups (which may hang in QEMU)
-        send("setenv skip_board_fixup 1", 2)
 
         # Bootargs
         send(f'setenv bootargs "{bootargs}"', 2)
