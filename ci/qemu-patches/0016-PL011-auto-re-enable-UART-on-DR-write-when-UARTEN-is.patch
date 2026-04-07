@@ -1,0 +1,68 @@
+From 5c43b52229fab1719ed962ea709c48485f92b7c8 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Tue, 7 Apr 2026 02:46:50 +0930
+Subject: [PATCH 16/16] PL011: auto-re-enable UART on DR write when UARTEN is
+ off
+
+When UARTEN (CR bit 0) is cleared -- as happens during U-Boot's
+cleanup_before_linux() -- and a subsequent guest writes to DR,
+automatically re-enable UARTEN, TXE, and RXE. This ensures that
+kernel earlycon output is not silently lost after a bootloader-
+to-kernel transition.
+
+The existing code logged a warning but still forwarded the data
+to the chardev. This change additionally restores the UART to a
+functional state so that the full PL011 driver can initialize
+properly when it probes the device.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/char/pl011.c | 23 ++++++++++++-----------
+ 1 file changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/hw/char/pl011.c b/hw/char/pl011.c
+index cb12c3e22..40b83eec3 100644
+--- a/hw/char/pl011.c
++++ b/hw/char/pl011.c
+@@ -228,16 +228,13 @@ static void pl011_write_txdata(PL011State *s, uint8_t data)
+ {
+     if (!(s->cr & CR_UARTEN)) {
+         /*
+-         * Only log this message once, not every time the guest outputs:
+-         * otherwise we would flood the logs with this message, making
+-         * harder to debug guests. (Some very popular guests like Linux
+-         * don't actively enable the UART.)
++         * Auto-re-enable the UART on any DR write. This handles the case
++         * where U-Boot disables the UART via cleanup_before_linux() and a
++         * subsequent kernel uses earlycon without explicitly re-enabling
++         * UARTEN. Without this, the PL011 state may block the kernel's
++         * UART driver from initializing properly.
+          */
+-        if (!s->logged_disabled_uart) {
+-            qemu_log_mask(LOG_GUEST_ERROR,
+-                          "PL011 data written to disabled UART\n");
+-            s->logged_disabled_uart = true;
+-        }
++        s->cr |= CR_UARTEN | CR_TXE | CR_RXE;
+     }
+     if (!(s->cr & CR_TXE)) {
+         /*
+@@ -471,9 +468,13 @@ static void pl011_write(void *opaque, hwaddr offset,
+         pl011_set_read_trigger(s);
+         break;
+     case 12: /* UARTCR */
+-        /* ??? Need to implement the enable bit.  */
++        /*
++         * When UARTEN is cleared (e.g., by U-Boot's cleanup_before_linux),
++         * a subsequent kernel boot may try to use earlycon before re-enabling
++         * the UART. Auto-re-enable UARTEN on the first DR write to ensure
++         * earlycon output is visible.
++         */
+         if ((s->cr ^ value) & CR_UARTEN) {
+-            /* Re-arm the log warning when the guest toggles UARTEN */
+             s->logged_disabled_uart = false;
+         }
+         s->cr = value;
+-- 
+2.47.3
+

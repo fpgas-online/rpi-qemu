@@ -1,0 +1,150 @@
+From 2bee915b7b3a89d4f36554225fac691f5acbe8c6 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 22:52:15 +0930
+Subject: [PATCH 12/16] Fix GENET: ANRESTART self-clear, intrl1 RX interrupts,
+ default ring
+
+Three more fixes for Linux bcmgenet driver compatibility:
+
+1. BMCR ANRESTART self-clearing: The FIELD_DP16 result was discarded
+   (classic C bug). ANRESTART bit stayed set permanently, causing
+   genphy_update_link to always return early ("autoneg in progress"),
+   resulting in NO-CARRIER. Now ANRESTART clears immediately and
+   triggers phy_update_link. Linux now sees "Link is Up - 1Gbps/Full".
+
+2. RDMA ring 16 (default queue) active check relaxed: The Linux driver
+   enables ring 16 via DMA_CTRL RING_BUF_EN bit 16, but the activation
+   check required both ring_cfg AND ring_buf_en bits. Default ring is
+   now always active when DMA_EN is set.
+
+3. RX completion interrupts routed to intrl1: Linux bcmgenet uses
+   intrl1 (priority IRQ) for per-queue RX completion, not intrl0
+   RXDMA_MBDONE. Now sets intrl1 RX_INTRS bit for all rings.
+
+Status: Linux link is UP, carrier detected, 84 intrl0 interrupts
+fired. Intrl1 RX interrupt delivery still under investigation.
+U-Boot DHCP + TFTP fully working.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 53 ++++++++++++++++++++++++++++--------------
+ 1 file changed, 35 insertions(+), 18 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index fe77cf2f0..d1da82c18 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -272,7 +272,8 @@ static void bcm2838_genet_set_irq_prio(BCM2838GenetState *s)
+ {
+     uint32_t intrl_1_status = s->regs.intrl1.stat;
+     uint32_t intrl_1_mask = s->regs.intrl1.mask_status;
+-    int level = (intrl_1_status & ~intrl_1_mask) == 0 ? 0 : 1;
++    uint32_t pending = intrl_1_status & ~intrl_1_mask;
++    int level = pending == 0 ? 0 : 1;
+ 
+     qemu_set_irq(s->irq_prio, level);
+ }
+@@ -341,6 +342,8 @@ static void bcm2838_genet_phy_exp_shadow_write(BCM2838GenetState *s,
+     s->phy_exp_shd_regs.regs[block_id][reg_id] = value;
+ }
+ 
++static void bcm2838_genet_phy_update_link(BCM2838GenetState *s);
++
+ static uint16_t bcm2838_genet_phy_exp_shadow_read(BCM2838GenetState *s)
+ {
+     uint16_t reg_id = FIELD_EX16(s->phy_regs.exp_ctrl,
+@@ -381,9 +384,11 @@ static uint64_t bcm2838_genet_mdio_cmd(BCM2838GenetState *s, uint64_t cmd)
+                 bcm2838_genet_phy_exp_shadow_write(s, phy_reg_data);
+             } else {
+                 if (phy_reg_id == BCM2838_GENET_PHY_BMCR) {
+-                    /* Initiate auto-negotiation once it has been restarted */
++                    /* ANRESTART is self-clearing; clear it and complete autoneg */
+                     if (anrestart == 1) {
+-                        FIELD_DP16(phy_reg_data, GENET_PHY_BMCR, ANRESTART, 0);
++                        phy_reg_data = FIELD_DP16(phy_reg_data,
++                                                  GENET_PHY_BMCR, ANRESTART, 0);
++                        bcm2838_genet_phy_update_link(s);
+                     }
+                 }
+                 *phy_reg = phy_reg_data;
+@@ -401,12 +406,11 @@ static void bcm2838_genet_xmit_packet(BCM2838GenetState *gs,
+     uint8_t *buf = packet;
+     size_t len = size;
+     uint16_t len_type = 0;
+-    bool tsb_en = FIELD_EX32(gs->regs.tdma.ctrl, GENET_DMA_CTRL,
+-                             TSB_SWAP_EN) != 0;
++    bool tsb_en = !!(gs->regs.tbuf.ctrl & 1); /* TBUF_64B_EN */
+ 
+     /*
+      * If TSB (Transmit Status Block) is prepended, skip it.
+-     * Linux enables TSB_SWAP_EN; U-Boot does not.
++     * Linux enables TBUF_64B_EN; U-Boot does not.
+      */
+     if (tsb_en && len > sizeof(BCM2838GenetXmitStatus)) {
+         buf += sizeof(BCM2838GenetXmitStatus);
+@@ -533,7 +537,13 @@ static bool bcm2838_genet_rdma_ring_active(BCM2838GenetState *s,
+     bool ring_buf_en = (FIELD_EX32(s->regs.rdma.ctrl,
+                                    GENET_DMA_CTRL, RING_BUF_EN)
+                         & ring_mask) != 0;
+-    bool active = dma_en && ring_en && ring_buf_en;
++    /*
++     * The default ring (ring 16) is active when DMA_EN is set, even if
++     * its specific RING_CFG and RING_BUF_EN bits haven't been set yet.
++     * Linux enables the default ring last in its DMA init sequence.
++     */
++    bool is_default_ring = (ring_index == BCM2838_GENET_DMA_RING_CNT - 1);
++    bool active = dma_en && (is_default_ring || (ring_en && ring_buf_en));
+ 
+     trace_bcm2838_genet_rx_dma_ring_active(ring_index,
+                                            active ? "active" : "halted");
+@@ -941,29 +951,36 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+         ring->write_ptr_hi = ((hwaddr)write_index * DESC_WORD_SIZE) >> 32;
+     }
+ 
+-    if (ring_idx == BCM2838_GENET_DMA_RING_DEFAULT) {
+-        s->regs.intrl0.stat = FIELD_DP32(s->regs.intrl0.stat,
+-                                         GENET_INTRL_0, RXDMA_MBDONE, 1);
+-    } else {
++    /*
++     * Set RX completion interrupt bits. The Linux driver uses intrl1
++     * for all rings including the default ring (ring 16). Also set
++     * intrl0 RXDMA_MBDONE for the default ring (used by some drivers).
++     */
++    {
+         uint32_t rx_intrs =
+             FIELD_EX32(s->regs.intrl1.stat, GENET_INTRL_1, RX_INTRS);
+         rx_intrs |= 1 << ring_idx;
+-
+         s->regs.intrl1.stat = FIELD_DP32(s->regs.intrl1.stat,
+                                          GENET_INTRL_1, RX_INTRS, rx_intrs);
+     }
++    if (ring_idx == BCM2838_GENET_DMA_RING_DEFAULT) {
++        s->regs.intrl0.stat = FIELD_DP32(s->regs.intrl0.stat,
++                                         GENET_INTRL_0, RXDMA_MBDONE, 1);
++    }
++    /* Debug trace removed */
+ 
+     return len;
+ }
+ 
+ static bool bcm2838_genet_can_receive(NetClientState *nc)
+ {
+-    /*
+-     * Always accept packets. If RDMA is not yet enabled, bcm2838_genet_receive
+-     * will return 0 causing the packet to be dropped, but this prevents SLIRP
+-     * from permanently stalling when it tries to send a response before the
+-     * guest has enabled RDMA.
+-     */
++    BCM2838GenetState *s = (BCM2838GenetState *)qemu_get_nic_opaque(nc);
++
++    /* Must have RDMA enabled */
++    if (FIELD_EX32(s->regs.rdma.ctrl, GENET_DMA_CTRL, EN) == 0) {
++        return false;
++    }
++
+     return true;
+ }
+ 
+-- 
+2.47.3
+

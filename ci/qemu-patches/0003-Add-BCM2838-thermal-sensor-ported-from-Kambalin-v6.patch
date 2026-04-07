@@ -1,0 +1,153 @@
+From e9744d0a32ec5accfbfec34a8f8b884ec3c86a7d Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 12:18:40 +0930
+Subject: [PATCH 03/16] Add BCM2838 thermal sensor (ported from Kambalin v6)
+
+Port of patch 17 with API fixes: const void in class_init,
+updated include paths.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/misc/bcm2838_thermal.c         | 98 +++++++++++++++++++++++++++++++
+ include/hw/misc/bcm2838_thermal.h | 24 ++++++++
+ 2 files changed, 122 insertions(+)
+ create mode 100644 hw/misc/bcm2838_thermal.c
+ create mode 100644 include/hw/misc/bcm2838_thermal.h
+
+diff --git a/hw/misc/bcm2838_thermal.c b/hw/misc/bcm2838_thermal.c
+new file mode 100644
+index 000000000..634fcfd1b
+--- /dev/null
++++ b/hw/misc/bcm2838_thermal.c
+@@ -0,0 +1,98 @@
++/*
++ * BCM2838 dummy thermal sensor
++ *
++ * Copyright (C) 2022 Maksim Kopusov <maksim.kopusov@auriga.com>
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qapi/error.h"
++#include "hw/misc/bcm2838_thermal.h"
++#include "hw/core/registerfields.h"
++#include "migration/vmstate.h"
++#include "qemu/error-report.h"
++
++REG32(STAT, 0x200)
++FIELD(STAT, DATA, 0, 10)
++FIELD(STAT, VALID_1, 10, 1)
++FIELD(STAT, VALID_2, 16, 1)
++
++#define BCM2838_THERMAL_SIZE 0xf00
++
++#define THERMAL_OFFSET_C 410040
++#define THERMAL_COEFF  (-487.0f)
++#define MILLIDEGREE_COEFF 1000
++
++static uint16_t bcm2838_thermal_temp2adc(int temp_C)
++{
++    return (temp_C * MILLIDEGREE_COEFF - THERMAL_OFFSET_C) / THERMAL_COEFF;
++}
++
++static uint64_t bcm2838_thermal_read(void *opaque, hwaddr addr, unsigned size)
++{
++    uint32_t val = 0;
++
++    switch (addr) {
++    case A_STAT:
++        /* Temperature is always 25°C */
++        val = FIELD_DP32(val, STAT, DATA, bcm2838_thermal_temp2adc(25));
++        val = FIELD_DP32(val, STAT, VALID_1, 1);
++        val = FIELD_DP32(val, STAT, VALID_2, 1);
++
++        break;
++    default:
++        qemu_log_mask(LOG_GUEST_ERROR, "%s can't access addr: 0x%"HWADDR_PRIx,
++                     TYPE_BCM2838_THERMAL, addr);
++    }
++    return val;
++}
++
++static void bcm2838_thermal_write(void *opaque, hwaddr addr,
++                                      uint64_t value, unsigned size)
++{
++    qemu_log_mask(LOG_GUEST_ERROR, "%s: write 0x%" PRIx64
++                                " to 0x%" HWADDR_PRIx "\n",
++                __func__, value, addr);
++}
++
++static const MemoryRegionOps bcm2838_thermal_ops = {
++    .read = bcm2838_thermal_read,
++    .write = bcm2838_thermal_write,
++    .impl.max_access_size = 4,
++    .valid.min_access_size = 4,
++    .endianness = DEVICE_NATIVE_ENDIAN,
++};
++
++static void bcm2838_thermal_realize(DeviceState *dev, Error **errp)
++{
++    Bcm2838ThermalState *s = BCM2838_THERMAL(dev);
++
++    memory_region_init_io(&s->iomem, OBJECT(s), &bcm2838_thermal_ops,
++                          s, TYPE_BCM2838_THERMAL, BCM2838_THERMAL_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
++}
++
++static void bcm2838_thermal_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++
++    dc->realize = bcm2838_thermal_realize;
++
++    /* This device has nothing to save: no need for vmstate or reset */
++}
++
++static const TypeInfo bcm2838_thermal_info = {
++    .name = TYPE_BCM2838_THERMAL,
++    .parent = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(Bcm2838ThermalState),
++    .class_init = bcm2838_thermal_class_init,
++};
++
++static void bcm2838_thermal_register_types(void)
++{
++    type_register_static(&bcm2838_thermal_info);
++}
++
++type_init(bcm2838_thermal_register_types)
+diff --git a/include/hw/misc/bcm2838_thermal.h b/include/hw/misc/bcm2838_thermal.h
+new file mode 100644
+index 000000000..8d8d35944
+--- /dev/null
++++ b/include/hw/misc/bcm2838_thermal.h
+@@ -0,0 +1,24 @@
++/*
++ * BCM2838 dummy thermal sensor
++ *
++ * Copyright (C) 2022 Maksim Kopusov <maksim.kopusov@auriga.com>
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2 or later.
++ * See the COPYING file in the top-level directory.
++ */
++
++#ifndef BCM2838_THERMAL_H
++#define BCM2838_THERMAL_H
++
++#include "hw/core/sysbus.h"
++#include "qom/object.h"
++
++#define TYPE_BCM2838_THERMAL "bcm2838-thermal"
++OBJECT_DECLARE_SIMPLE_TYPE(Bcm2838ThermalState, BCM2838_THERMAL)
++
++struct Bcm2838ThermalState {
++    SysBusDevice busdev;
++    MemoryRegion iomem;
++};
++
++#endif /* BCM2838_THERMAL_H */
+-- 
+2.47.3
+

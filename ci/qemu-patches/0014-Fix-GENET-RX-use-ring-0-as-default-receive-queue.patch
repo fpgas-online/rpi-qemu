@@ -1,0 +1,47 @@
+From 5ba916a2feb054041dda3c3b00baed307665f3b8 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 23:03:49 +0930
+Subject: [PATCH 14/16] Fix GENET RX: use ring 0 as default receive queue
+
+The Linux bcmgenet driver configures HFB filter 0 to direct all
+default traffic to ring 0 (not ring 16). It only sets up NAPI
+for ring 0 (rx_queues=0 means ring 0 is the only RX ring). The
+QEMU GENET code was sending unfiltered packets to ring 16 which
+has no NAPI handler, no interrupts, and no descriptors set up.
+
+This was the root cause of Linux ping/DHCP failure: packets were
+delivered to the wrong DMA ring.
+
+Result: Full end-to-end Linux networking now works:
+  64 bytes from 10.0.2.2: seq=0 ttl=255 time=41.317 ms
+  64 bytes from 10.0.2.2: seq=1 ttl=255 time=1.041 ms
+  64 bytes from 10.0.2.2: seq=2 ttl=255 time=1.087 ms
+  udhcpc: lease of 10.0.2.15 obtained from 10.0.2.2
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index adc2f459e..6d2080b23 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -999,7 +999,13 @@ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+         if (filter_index >= 0) {
+             ring_index = bcm2838_genet_filter2ring(s, filter_index);
+         } else {
+-            ring_index = BCM2838_GENET_DMA_RING_CNT - 1;
++            /*
++             * No HFB filter match. The Linux driver configures HFB filter 0
++             * to send all default traffic to ring 0 and only uses ring 0
++             * for RX (with NAPI). Use ring 0 as default when HFB is not
++             * implemented.
++             */
++            ring_index = 0;
+         }
+ 
+         if (size <= MAX_PACKET_SIZE) {
+-- 
+2.47.3
+

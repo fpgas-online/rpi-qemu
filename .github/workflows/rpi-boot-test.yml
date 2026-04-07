@@ -1,0 +1,165 @@
+name: RPi QEMU Boot Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  boot-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libglib2.0-dev \
+            libpixman-1-dev \
+            libslirp-dev \
+            ninja-build \
+            meson \
+            pkg-config \
+            python3 \
+            python3-venv \
+            cpio \
+            wget
+
+      - name: Cache QEMU build
+        id: cache-qemu
+        uses: actions/cache@v4
+        with:
+          path: upstream-qemu
+          key: qemu-v11.0.0-rc2-genet-${{ hashFiles('ci/qemu-patches/*.patch') }}
+
+      - name: Build QEMU (with GENET patches)
+        if: steps.cache-qemu.outputs.cache-hit != 'true'
+        run: |
+          echo "=== Cloning QEMU v11.0.0-rc2 ==="
+          git clone --depth=1 --branch v11.0.0-rc2 \
+            https://gitlab.com/qemu-project/qemu.git upstream-qemu
+
+          echo "=== Applying GENET patches ==="
+          cd upstream-qemu
+          for patch in ../ci/qemu-patches/*.patch; do
+            echo "Applying: $(basename $patch)"
+            git apply "$patch"
+          done
+
+          echo "=== Configuring QEMU ==="
+          mkdir -p build && cd build
+          ../configure --target-list=aarch64-softmmu
+
+          echo "=== Building QEMU ==="
+          ninja -j$(nproc)
+
+          echo "=== QEMU built ==="
+          ls -lh qemu-system-aarch64
+
+      - name: Cache U-Boot build
+        id: cache-uboot
+        uses: actions/cache@v4
+        with:
+          path: test-images/u-boot
+          key: uboot-47e064f1-qemu-${{ hashFiles('ci/rpi_4_qemu_defconfig') }}
+
+      - name: Build U-Boot
+        if: steps.cache-uboot.outputs.cache-hit != 'true'
+        run: |
+          echo "=== Cloning U-Boot ==="
+          mkdir -p test-images
+          git clone --depth=100 https://github.com/u-boot/u-boot.git test-images/u-boot
+          cd test-images/u-boot
+          git checkout 47e064f13171f15817aa1b22b04e309964b15c2c
+
+          echo "=== Copying QEMU defconfig ==="
+          cp ../../ci/rpi_4_qemu_defconfig configs/rpi_4_qemu_defconfig
+
+          echo "=== Building U-Boot ==="
+          make rpi_4_qemu_defconfig
+          make -j$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "=== U-Boot built ==="
+          ls -lh u-boot.bin
+
+      - name: Ensure U-Boot defconfig is current
+        if: steps.cache-uboot.outputs.cache-hit == 'true'
+        run: |
+          cp ci/rpi_4_qemu_defconfig test-images/u-boot/configs/rpi_4_qemu_defconfig
+          cd test-images/u-boot
+          make rpi_4_qemu_defconfig
+          make -j$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
+
+      - name: Cache RPi kernel
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            test-images/kernel8.img
+            test-images/bcm2711-rpi-4-b.dtb
+            test-images/tftpboot/Image
+            test-images/tftpboot/bcm2711-rpi-4-b.dtb
+          key: rpi-kernel-v1
+
+      - name: Download RPi kernel and DTB
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p test-images/tftpboot
+
+          echo "=== Downloading RPi firmware (sparse checkout) ==="
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/raspberrypi/firmware.git /tmp/rpi-fw
+          cd /tmp/rpi-fw
+          git sparse-checkout set boot/kernel8.img boot/bcm2711-rpi-4-b.dtb
+          cd -
+
+          echo "=== Extracting kernel Image ==="
+          cp /tmp/rpi-fw/boot/kernel8.img test-images/kernel8.img
+          cp /tmp/rpi-fw/boot/bcm2711-rpi-4-b.dtb test-images/bcm2711-rpi-4-b.dtb
+          cp test-images/bcm2711-rpi-4-b.dtb test-images/tftpboot/
+
+          # Decompress kernel8.img (gzipped Image) to get uncompressed Image
+          gunzip -k -f test-images/kernel8.img
+          mv test-images/kernel8 test-images/tftpboot/Image
+
+          echo "=== Kernel files ==="
+          ls -lh test-images/tftpboot/Image test-images/tftpboot/bcm2711-rpi-4-b.dtb
+
+          rm -rf /tmp/rpi-fw
+
+      - name: Download Alpine and build initramfs
+        run: |
+          mkdir -p test-images
+
+          echo "=== Downloading Alpine minirootfs ==="
+          wget -q -O test-images/alpine-minirootfs.tar.gz \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz"
+
+          echo "=== Building initramfs ==="
+          sudo python3 build-initramfs.py
+
+          echo "=== Copying to tftpboot ==="
+          mkdir -p test-images/tftpboot
+          cp test-images/test-initramfs.cpio.gz test-images/tftpboot/initrd.gz
+
+          ls -lh test-images/tftpboot/
+
+      - name: Run RPi boot test
+        run: |
+          echo "=== Running single-instance boot test ==="
+          python3 run-rpi-boot-test.py
+
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-test-log
+          path: tmp/
+          retention-days: 7

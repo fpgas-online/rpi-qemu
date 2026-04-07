@@ -1,0 +1,93 @@
+From 1a53dd6a54f3d8ba672ad58d2cedb56000390a7b Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 18:38:01 +0930
+Subject: [PATCH 09/16] Fix GENET DMA status: report halted state for Linux
+ driver
+
+The Linux bcmgenet driver's bcmgenet_tdma_disable() and
+bcmgenet_rdma_disable() write 0 to DMA_CTRL to halt DMA, then
+poll DMA_STATUS expecting the corresponding bits to be set
+(indicating DMA is idle). Since QEMU has no real DMA engine,
+immediately set all status bits when DMA_EN is cleared.
+
+Also adds RDMA_CTRL handler to the write dispatch (previously
+only TDMA had explicit handling; RDMA fell through to default).
+
+Fixes: "bcmgenet: failed to halt Tx DMA" / "failed to initialize
+DMA" errors during Linux network interface open.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 34 +++++++++++++++++++++++++++++-----
+ 1 file changed, 29 insertions(+), 5 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index c0298bcec..a2cee9388 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -608,10 +608,24 @@ static void bcm2838_genet_tdma(BCM2838GenetState *s, hwaddr offset,
+         }
+         break;
+     case BCM2838_GENET_TDMA_CTRL:
++        /*
++         * The Linux driver's bcmgenet_tdma_disable() clears DMA_EN and
++         * ring enable bits in CTRL, then polls DMA_STATUS expecting
++         * (status & mask) == mask. In QEMU there is no real DMA engine,
++         * so immediately reflect the disabled state in STATUS.
++         *
++         * When DMA_EN is 0 (disabled), set all mask bits in STATUS to
++         * indicate all channels are idle. When enabled, clear STATUS.
++         * Note: driver checks (status & mask) == mask, where mask is
++         * the same bits that were cleared in CTRL.
++         */
++        if (!incm_tdma_en) {
++            /* Set all possible disable indicator bits */
++            s->regs.tdma.status = 0xFFFFFFFF;
++        } else {
++            s->regs.tdma.status = 0;
++        }
+         if (exst_tdma_en != incm_tdma_en) {
+-            s->regs.tdma.status = FIELD_DP32(s->regs.tdma.status,
+-                                             GENET_DMA_STATUS,
+-                                             DISABLED, !exst_tdma_en);
+             trace_bcm2838_genet_tx_dma(incm_tdma_en == 1
+                                        ? "enabled"
+                                        : "disabled");
+@@ -630,7 +644,7 @@ static uint64_t bcm2838_genet_read(void *opaque, hwaddr offset, unsigned size)
+     uint64_t value = ~0;
+     BCM2838GenetState *s = opaque;
+ 
+-    if (offset + size < sizeof(s->regs)) {
++    if (offset + size <= sizeof(s->regs)) {
+         memcpy(&value, (uint8_t *)&s->regs + offset, size);
+     } else {
+         qemu_log_mask(
+@@ -652,7 +666,7 @@ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+ 
+     trace_bcm2838_genet_write(size, offset, value);
+ 
+-    if (offset + size < sizeof(s->regs)) {
++    if (offset + size <= sizeof(s->regs)) {
+         switch (offset) {
+         case BCM2838_GENET_INTRL0_SET:
+             s->regs.intrl0.stat |= value;
+@@ -717,6 +731,16 @@ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+             ... BCM2838_GENET_TDMA_REGS + sizeof(BCM2838GenetRegsTdma) - 1:
+             bcm2838_genet_tdma(s, offset, value);
+             break;
++        case BCM2838_GENET_RDMA_CTRL:
++            {
++                uint32_t new_en = FIELD_EX32(value, GENET_DMA_CTRL, EN);
++                if (!new_en) {
++                    s->regs.rdma.status = 0xFFFFFFFF;
++                } else {
++                    s->regs.rdma.status = 0;
++                }
++            }
++            break;
+         default:
+             break;
+         }
+-- 
+2.47.3
+

@@ -1,0 +1,309 @@
+From a7376f3b2e282b0adc31146ba741fc51f17a3c3d Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 12:18:59 +0930
+Subject: [PATCH 05/16] Wire BCM2838 peripherals: GENET, PCIe, RNG200, Thermal
+
+Integration commit: connect all new devices to the BCM2838 SoC
+and RPi 4B machine.
+
+- bcm2838_peripherals.h: Add includes and device state fields
+- bcm2838_peripherals.c: Init/realize for all 4 new devices with
+  memory mapping and IRQ wiring
+- bcm2838.c: Connect device IRQs to GIC (SPI 125, 143, 157-158)
+- raspi4b.c: Remove DTB disabling of now-implemented devices
+- meson.build: Add new source files to build
+- trace-events: Add RNG200 trace events
+- raspi.rst: Move GENET/PCIe to implemented, PWM only missing
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ docs/system/arm/raspi.rst            |  6 ++-
+ hw/arm/bcm2838.c                     | 19 ++++++++
+ hw/arm/bcm2838_peripherals.c         | 65 ++++++++++++++++++++++++++++
+ hw/arm/meson.build                   |  1 +
+ hw/arm/raspi4b.c                     | 23 +---------
+ hw/misc/meson.build                  |  2 +
+ hw/misc/trace-events                 | 10 +++++
+ hw/net/meson.build                   |  2 +
+ include/hw/arm/bcm2838_peripherals.h |  8 ++++
+ 9 files changed, 112 insertions(+), 24 deletions(-)
+
+diff --git a/docs/system/arm/raspi.rst b/docs/system/arm/raspi.rst
+index 44eec3f1c..9ebf03632 100644
+--- a/docs/system/arm/raspi.rst
++++ b/docs/system/arm/raspi.rst
+@@ -36,10 +36,12 @@ Implemented devices
+  * VideoCore firmware (property)
+  * Peripheral SPI controller (SPI)
+  * Broadcom Serial Controller (I2C)
++ * PCIE Root Port (raspi4b)
++ * GENET Ethernet Controller (raspi4b)
++ * Hardware Random Number Generator (RNG200, raspi4b)
++ * Thermal sensor (raspi4b)
+ 
+ Missing devices
+ ---------------
+ 
+  * Pulse Width Modulation (PWM)
+- * PCIE Root Port (raspi4b)
+- * GENET Ethernet Controller (raspi4b)
+diff --git a/hw/arm/bcm2838.c b/hw/arm/bcm2838.c
+index c14a85404..0899285be 100644
+--- a/hw/arm/bcm2838.c
++++ b/hw/arm/bcm2838.c
+@@ -205,6 +205,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
+     sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->dwc2), 0,
+                        qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_DWC2));
+ 
++    /* Connect RNG200 to the interrupt controller */
++    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->rng200), 0,
++                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_RNG200));
++
+     /* Connect DMA 0-6 to the interrupt controller */
+     for (int n = GIC_SPI_INTERRUPT_DMA_0; n <= GIC_SPI_INTERRUPT_DMA_6; n++) {
+         sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->dma),
+@@ -226,6 +230,21 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
+     qdev_connect_gpio_out(dma_9_10_irq_orgate, 0,
+                           qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_DMA_9_10));
+ 
++    /* Connect PCIe host bridge to the interrupt controller */
++    for (int n = 0; n < BCM2838_PCIE_NUM_IRQS; n++) {
++        int int_n = GIC_SPI_INTERRUPT_PCI_INT_A + n;
++        sysbus_connect_irq(SYS_BUS_DEVICE(&ps->pcie_host), n,
++                           qdev_get_gpio_in(gicdev, int_n));
++        bcm2838_pcie_host_set_irq_num(BCM2838_PCIE_HOST(&ps->pcie_host), n,
++                                      int_n);
++    }
++
++    /* Connect Gigabit Ethernet controller to the interrupt controller */
++    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->genet), 0,
++                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_GENET_A));
++    sysbus_connect_irq(SYS_BUS_DEVICE(&ps->genet), 1,
++                       qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_GENET_B));
++
+     /* Pass through inbound GPIO lines to the GIC */
+     qdev_init_gpio_in(dev, bcm2838_gic_set_irq, GIC_NUM_IRQS);
+ 
+diff --git a/hw/arm/bcm2838_peripherals.c b/hw/arm/bcm2838_peripherals.c
+index 812b5b848..47b0f588f 100644
+--- a/hw/arm/bcm2838_peripherals.c
++++ b/hw/arm/bcm2838_peripherals.c
+@@ -15,6 +15,13 @@
+ #define CLOCK_ISP_OFFSET        0xc11000
+ #define CLOCK_ISP_SIZE          0x100
+ 
++#define PCIE_RC_OFFSET          0x1500000
++#define PCIE_MMIO_OFFSET        0xc0000000
++#define PCIE_MMIO_ARM_OFFSET    0x600000000
++#define PCIE_MMIO_SIZE          0x40000000
++
++#define GENET_OFFSET            0x1580000
++
+ /* Lower peripheral base address on the VC (GPU) system bus */
+ #define BCM2838_VC_PERI_LOW_BASE 0x7c000000
+ 
+@@ -32,6 +39,20 @@ static void bcm2838_peripherals_init(Object *obj)
+                        bc->peri_low_size);
+     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->peri_low_mr);
+ 
++    /* Random Number Generator */
++    object_initialize_child(obj, "rng200", &s->rng200, TYPE_BCM2838_RNG200);
++
++    /* Thermal */
++    object_initialize_child(obj, "thermal", &s->thermal, TYPE_BCM2838_THERMAL);
++
++    /* PCIe Host Bridge */
++    object_initialize_child(obj, "pcie-host", &s->pcie_host,
++                            TYPE_BCM2838_PCIE_HOST);
++
++    /* Gigabit Ethernet */
++    object_initialize_child(obj, "genet", &s->genet, TYPE_BCM2838_GENET);
++    qemu_configure_nic_device(DEVICE(&s->genet), true, NULL);
++
+     /* Extended Mass Media Controller 2 */
+     object_initialize_child(obj, "emmc2", &s->emmc2, TYPE_SYSBUS_SDHCI);
+ 
+@@ -67,6 +88,12 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
+     MemoryRegion *mphi_mr;
+     BCM2838PeripheralState *s = BCM2838_PERIPHERALS(dev);
+     BCMSocPeripheralBaseState *s_base = BCM_SOC_PERIPHERALS_BASE(dev);
++    MemoryRegion *regs_mr;
++    MemoryRegion *mmio_mr;
++    MemoryRegion *rng200_mr;
++    qemu_irq rng_200_irq;
++    MemoryRegion *thermal_mr;
++
+     int n;
+ 
+     bcm_soc_peripherals_common_realize(dev, errp);
+@@ -79,6 +106,25 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
+                                         BCM2838_VC_PERI_LOW_BASE,
+                                         &s->peri_low_mr_alias, 1);
+ 
++    /* Random Number Generator */
++    if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng200), errp)) {
++        return;
++    }
++
++    rng200_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->rng200), 0);
++    memory_region_add_subregion(&s_base->peri_mr, RNG_OFFSET, rng200_mr);
++
++    rng_200_irq = qdev_get_gpio_in_named(DEVICE(&s_base->ic),
++                                         BCM2835_IC_GPU_IRQ, INTERRUPT_RNG);
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->rng200), 0, rng_200_irq);
++
++    /* THERMAL */
++    if (!sysbus_realize(SYS_BUS_DEVICE(&s->thermal), errp)) {
++        return;
++    }
++    thermal_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->thermal), 0);
++    memory_region_add_subregion( &s->peri_low_mr, 0x15D2000, thermal_mr);
++
+     /* Extended Mass Media Controller 2 */
+     object_property_set_uint(OBJECT(&s->emmc2), "sd-spec-version", 3,
+                              &error_abort);
+@@ -179,6 +225,25 @@ static void bcm2838_peripherals_realize(DeviceState *dev, Error **errp)
+     memory_region_add_subregion(&s_base->peri_mr, BCM2838_MPHI_OFFSET,
+                                 &s->mphi_mr_alias);
+ 
++    /* PCIe Root Complex */
++    if (!sysbus_realize(SYS_BUS_DEVICE(&s->pcie_host), errp)) {
++        return;
++    }
++    /* RC registers region */
++    regs_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pcie_host), 0);
++    memory_region_add_subregion(&s->peri_low_mr, PCIE_RC_OFFSET, regs_mr);
++    /* MMIO region */
++    mmio_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->pcie_host), 1);
++    memory_region_add_subregion(get_system_memory(), PCIE_MMIO_ARM_OFFSET,
++                                mmio_mr);
++
++    /* Gigabit Ethernet */
++    if (!sysbus_realize(SYS_BUS_DEVICE(&s->genet), errp)) {
++        return;
++    }
++    regs_mr = sysbus_mmio_get_region(SYS_BUS_DEVICE(&s->genet), 0);
++    memory_region_add_subregion(&s->peri_low_mr, GENET_OFFSET, regs_mr);
++
+     create_unimp(s_base, &s->clkisp, "bcm2835-clkisp", CLOCK_ISP_OFFSET,
+                  CLOCK_ISP_SIZE);
+ 
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index b187b946f..bcf546409 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -29,6 +29,7 @@ arm_common_ss.add(when: 'CONFIG_ALLWINNER_R40', if_true: files('allwinner-r40.c'
+ arm_common_ss.add(when: 'CONFIG_MAX78000_SOC', if_true: files('max78000_soc.c'))
+ arm_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2836.c', 'raspi.c'))
+ arm_common_ss.add(when: ['CONFIG_RASPI', 'TARGET_AARCH64'], if_true: files('bcm2838.c', 'raspi4b.c'))
++arm_common_ss.add(when: ['CONFIG_RASPI', 'TARGET_AARCH64'], if_true: files('bcm2838_pcie.c'))
+ arm_common_ss.add(when: 'CONFIG_STM32F100_SOC', if_true: files('stm32f100_soc.c'))
+ arm_common_ss.add(when: 'CONFIG_STM32F205_SOC', if_true: files('stm32f205_soc.c'))
+ arm_common_ss.add(when: 'CONFIG_STM32F405_SOC', if_true: files('stm32f405_soc.c'))
+diff --git a/hw/arm/raspi4b.c b/hw/arm/raspi4b.c
+index 3eeb8f447..b9430309a 100644
+--- a/hw/arm/raspi4b.c
++++ b/hw/arm/raspi4b.c
+@@ -60,28 +60,7 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
+ 
+ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
+ {
+-    uint64_t ram_size;
+-
+-    /* Temporarily disable following devices until they are implemented */
+-    const char *nodes_to_remove[] = {
+-        "brcm,bcm2711-pcie",
+-        "brcm,bcm2711-rng200",
+-        "brcm,bcm2711-thermal",
+-        "brcm,bcm2711-genet-v5",
+-    };
+-
+-    for (int i = 0; i < ARRAY_SIZE(nodes_to_remove); i++) {
+-        const char *dev_str = nodes_to_remove[i];
+-
+-        int offset = fdt_node_offset_by_compatible(fdt, -1, dev_str);
+-        if (offset >= 0) {
+-            if (!fdt_nop_node(fdt, offset)) {
+-                warn_report("bcm2711 dtc: %s has been disabled!", dev_str);
+-            }
+-        }
+-    }
+-
+-    ram_size = board_ram_size(info->board_id);
++    uint64_t ram_size = board_ram_size(info->board_id);
+ 
+     if (info->ram_size > UPPER_RAM_BASE) {
+         raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 092f70bde..68815de43 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -94,6 +94,8 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files(
+   'bcm2835_cprman.c',
+   'bcm2835_powermgt.c',
+ ))
++system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_rng200.c'))
++system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_thermal.c'))
+ system_ss.add(when: 'CONFIG_SLAVIO', if_true: files('slavio_misc.c'))
+ system_ss.add(when: 'CONFIG_ZYNQ', if_true: files('zynq_slcr.c'))
+ system_ss.add(when: 'CONFIG_XLNX_ZYNQMP_ARM', if_true: files('xlnx-zynqmp-crf.c'))
+diff --git a/hw/misc/trace-events b/hw/misc/trace-events
+index b88accc43..2976ad60f 100644
+--- a/hw/misc/trace-events
++++ b/hw/misc/trace-events
+@@ -417,3 +417,13 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
+ iommu_testdev_dma_verify(uint32_t expected, uint32_t actual) "expected=0x%x actual=0x%x"
+ iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
+ iommu_testdev_dma_armed(bool armed) "armed=%d"
++
++# bcm2838_rng200.c
++bcm2838_rng200_rng_soft_reset(void) "RNumG soft reset"
++bcm2838_rng200_rbg_soft_reset(void) "RBitG soft reset"
++bcm2838_rng200_enable_rbg(void)     "RBitG enabled"
++bcm2838_rng200_disable_rbg(void)    "RBitG disabled"
++bcm2838_rng200_update_fifo(uint32_t len, uint32_t fifo_len)    "len %u, fifo_len %u"
++bcm2838_rng200_fifo_full(void) "RNumG FIFO full"
++bcm2838_rng200_write(uint64_t addr, uint64_t value, unsigned size) "addr: 0x%"PRIx64" value: 0x%016" PRIx64 " size: %u"
++bcm2838_rng200_read(uint64_t addr, unsigned size, uint64_t value) "addr: 0x%"PRIx64" size: %u value: 0x%016" PRIx64
+diff --git a/hw/net/meson.build b/hw/net/meson.build
+index 310258746..94f5caeb6 100644
+--- a/hw/net/meson.build
++++ b/hw/net/meson.build
+@@ -70,4 +70,6 @@ system_ss.add(when: 'CONFIG_ROCKER', if_true: files(
+ stub_ss.add(files('rocker/rocker-stubs.c'))
+ system_ss.add(files('rocker/rocker-hmp-cmds.c'))
+ 
++system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_genet.c'))
++
+ subdir('can')
+diff --git a/include/hw/arm/bcm2838_peripherals.h b/include/hw/arm/bcm2838_peripherals.h
+index 7ee1bd066..90885120e 100644
+--- a/include/hw/arm/bcm2838_peripherals.h
++++ b/include/hw/arm/bcm2838_peripherals.h
+@@ -10,6 +10,10 @@
+ #define BCM2838_PERIPHERALS_H
+ 
+ #include "hw/arm/bcm2835_peripherals.h"
++#include "hw/misc/bcm2838_rng200.h"
++#include "hw/misc/bcm2838_thermal.h"
++#include "hw/arm/bcm2838_pcie.h"
++#include "hw/net/bcm2838_genet.h"
+ #include "hw/sd/sdhci.h"
+ #include "hw/gpio/bcm2838_gpio.h"
+ 
+@@ -63,8 +67,12 @@ struct BCM2838PeripheralState {
+     MemoryRegion peri_low_mr_alias;
+     MemoryRegion mphi_mr_alias;
+ 
++    BCM2838Rng200State rng200;
++    Bcm2838ThermalState thermal;
+     SDHCIState emmc2;
++    BCM2838PcieHostState pcie_host;
+     BCM2838GpioState gpio;
++    BCM2838GenetState genet;
+ 
+     OrIRQState mmc_irq_orgate;
+     OrIRQState dma_7_8_irq_orgate;
+-- 
+2.47.3
+

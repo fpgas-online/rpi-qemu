@@ -1,0 +1,34 @@
+From 59c8f19305dfafc5c27bff70d94eeb8080620638 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 12:23:40 +0930
+Subject: [PATCH 06/16] Fix RNG200 include: sysemu/rng.h -> system/rng.h
+
+Same sysemu/ -> system/ rename as dma.h, missed in initial
+API fix pass.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ include/hw/misc/bcm2838_rng200.h | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/include/hw/misc/bcm2838_rng200.h b/include/hw/misc/bcm2838_rng200.h
+index e8016372d..3a06b1520 100644
+--- a/include/hw/misc/bcm2838_rng200.h
++++ b/include/hw/misc/bcm2838_rng200.h
+@@ -13,10 +13,10 @@
+ #include <stdbool.h>
+ #include "qom/object.h"
+ #include "qemu/fifo8.h"
+-#include "sysemu/rng.h"
++#include "system/rng.h"
+ #include "hw/core/sysbus.h"
+-#include "hw/ptimer.h"
+-#include "hw/qdev-clock.h"
++#include "hw/core/ptimer.h"
++#include "hw/core/qdev-clock.h"
+ #include "hw/core/irq.h"
+ 
+ #define TYPE_BCM2838_RNG200 "bcm2838-rng200"
+-- 
+2.47.3
+

@@ -1,0 +1,88 @@
+From 0b7b91af6fbccdd6f25fb9bd70bafcbd60e6475f Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 19:43:54 +0930
+Subject: [PATCH 11/16] Fix GENET RX: respect RBUF_64B_EN for receive status
+ block
+
+The Linux driver enables RBUF_64B_EN which prepends a 64-byte receive
+status block (RSB) before the frame data in DMA buffers. U-Boot does
+not enable this, expecting raw frames at the buffer address + 2-byte
+alignment offset.
+
+The RDMA path unconditionally prepended the RSB, corrupting U-Boot's
+packet parsing. Now checks RBUF_CTRL bits 0 (RBUF_64B_EN) and 1
+(RBUF_ALIGN_2B) to determine the actual header size.
+
+Result: U-Boot DHCP now works:
+  BOOTP broadcast 1
+  DHCP client bound to address 10.0.2.15 (2 ms)
+
+Both TX (BOOTP broadcast) and RX (DHCP response) paths verified.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index cf6b082f7..fe77cf2f0 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -855,9 +855,20 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+         eth_l4_hdr_info  l4hdr_info;
+ 
+         bool crc_fwd = FIELD_EX32(s->regs.umac.cmd, GENET_UMAC_CMD, CRC_FWD);
++        bool rbuf_64b_en = !!(s->regs.rbuf.ctrl & 1); /* RBUF_64B_EN */
++        bool rbuf_align_2b = !!(s->regs.rbuf.ctrl & 2); /* RBUF_ALIGN_2B */
++        size_t hdr_size = 0;
+         size_t buflength;
+         uint32_t prod_index;
+ 
++        if (rbuf_64b_en) {
++            hdr_size += sizeof(BCM2838GenetXmitStatus);
++        }
++        if (rbuf_align_2b) {
++            hdr_size += 2;
++        }
++        frame_buf = dma_buf + hdr_size;
++
+         if (l > ring->ring_buf_size) {
+             l = ring->ring_buf_size;
+         }
+@@ -876,7 +887,7 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+                                          GENET_RDMA_LENGTH_STATUS,
+                                          EOP, !!(len >= size));
+ 
+-        buflength = l + sizeof(BCM2838GenetXmitStatus) + 2;
++        buflength = l + hdr_size;
+         if (crc_fwd) {
+             buflength += 4;
+         }
+@@ -894,15 +905,19 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+                                          MULTICAST,
+                                          !!is_packet_multicast(frame_buf, l));
+ 
+-        xmit_status->rx_csum = 0;
+-        if (isip4) {
+-            xmit_status->rx_csum = ip4hdr_info.ip4_hdr.ip_sum;
++        if (rbuf_64b_en) {
++            xmit_status->rx_csum = 0;
++            if (isip4) {
++                xmit_status->rx_csum = ip4hdr_info.ip4_hdr.ip_sum;
++            }
++            xmit_status->length_status = desc->length_status;
+         }
+-        xmit_status->length_status = desc->length_status;
+ 
+         mem_tx_result = address_space_write(&s->dma_as, dma_buf_addr,
+                                             MEMTXATTRS_UNSPECIFIED,
+-                                            dma_buf, buf_size);
++                                            dma_buf,
++                                            buflength < buf_size
++                                                ? buflength : buf_size);
+         if (mem_tx_result != MEMTX_OK) {
+             desc->length_status = FIELD_DP32(desc->length_status,
+                                              GENET_RDMA_LENGTH_STATUS,
+-- 
+2.47.3
+

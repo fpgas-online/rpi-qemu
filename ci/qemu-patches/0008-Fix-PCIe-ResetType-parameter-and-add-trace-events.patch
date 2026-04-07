@@ -1,0 +1,51 @@
+From 6de96a122c7dae37d6111d77635678df0282c89a Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 12:33:21 +0930
+Subject: [PATCH 08/16] Fix PCIe: ResetType parameter and add trace events
+
+- bcm2838_pcie_root_port_reset_hold now takes ResetType arg
+  (QEMU v11 resettable API change)
+- Add missing PCIe trace events to hw/arm/trace-events
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/arm/bcm2838_pcie.c | 4 ++--
+ hw/arm/trace-events   | 4 ++++
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/hw/arm/bcm2838_pcie.c b/hw/arm/bcm2838_pcie.c
+index fa2c16b8f..b56a1fd32 100644
+--- a/hw/arm/bcm2838_pcie.c
++++ b/hw/arm/bcm2838_pcie.c
+@@ -230,14 +230,14 @@ static const TypeInfo bcm2838_pcie_host_info = {
+  * RC root part (D0:F0)
+  */
+ 
+-static void bcm2838_pcie_root_port_reset_hold(Object *obj)
++static void bcm2838_pcie_root_port_reset_hold(Object *obj, ResetType type)
+ {
+     PCIERootPortClass *rpc = PCIE_ROOT_PORT_GET_CLASS(obj);
+     PCIDevice *dev = PCI_DEVICE(obj);
+     BCM2838PcieRootState *s = BCM2838_PCIE_ROOT(dev);
+ 
+     if (rpc->parent_phases.hold) {
+-        rpc->parent_phases.hold(obj);
++        rpc->parent_phases.hold(obj, type);
+     }
+ 
+     memset(s->regs, 0xFF, sizeof(s->regs));
+diff --git a/hw/arm/trace-events b/hw/arm/trace-events
+index 3457536fb..5660949ae 100644
+--- a/hw/arm/trace-events
++++ b/hw/arm/trace-events
+@@ -85,3 +85,7 @@ z2_aer915_event(int8_t event, int8_t len) "i2c event =0x%x len=%d bytes"
+ 
+ # bcm2838.c
+ bcm2838_gic_set_irq(int irq, int level) "gic irq:%d lvl:%d"
++
++# bcm2838_pcie.c
++bcm2838_pcie_host_read(unsigned int size, uint64_t offset, uint64_t value) "%u bytes @ 0x%04"PRIx64": 0x%016"PRIx64
++bcm2838_pcie_host_write(unsigned int size, uint64_t offset, uint64_t value) "%u bytes @ 0x%04"PRIx64": 0x%016"PRIx64
+-- 
+2.47.3
+

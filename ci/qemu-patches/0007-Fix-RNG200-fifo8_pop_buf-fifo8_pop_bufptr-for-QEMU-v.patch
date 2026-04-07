@@ -1,0 +1,30 @@
+From 3d7e0354d697aeec0aec8bb52787784e4c3e14e6 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 12:25:37 +0930
+Subject: [PATCH 07/16] Fix RNG200: fifo8_pop_buf -> fifo8_pop_bufptr for QEMU
+ v11
+
+The fifo8_pop_buf API changed signature in QEMU v11. The old
+pointer-returning variant is now fifo8_pop_bufptr.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/misc/bcm2838_rng200.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hw/misc/bcm2838_rng200.c b/hw/misc/bcm2838_rng200.c
+index 8e345ae8e..1888591a4 100644
+--- a/hw/misc/bcm2838_rng200.c
++++ b/hw/misc/bcm2838_rng200.c
+@@ -182,7 +182,7 @@ static uint32_t bcm2838_rng200_read_fifo_data(BCM2838Rng200State *s)
+     uint32_t num = 0;
+ 
+     while (to_read) {
+-        buf = fifo8_pop_buf(fifo, to_read, &num);
++        buf = fifo8_pop_bufptr(fifo, to_read, &num);
+         memcpy(p, buf, num);
+         p += num;
+         to_read -= num;
+-- 
+2.47.3
+

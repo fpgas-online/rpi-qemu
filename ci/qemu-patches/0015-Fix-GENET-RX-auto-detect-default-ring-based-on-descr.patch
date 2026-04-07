@@ -1,0 +1,52 @@
+From 99759ea6ffc19e0ed5dd0ef828e6fbb7c929439b Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 23:26:36 +0930
+Subject: [PATCH 15/16] Fix GENET RX: auto-detect default ring based on
+ descriptor config
+
+Linux uses ring 0 (HFB filter 0 routes default traffic there),
+while U-Boot uses ring 16 (hardware default). Instead of hardcoding
+either, check if ring 0 has descriptors configured (non-zero
+start/end addresses). If so, use ring 0; otherwise fall back to
+ring 16.
+
+This makes both Linux and U-Boot work correctly.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 18 +++++++++++++-----
+ 1 file changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index 6d2080b23..476f692ac 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -1000,12 +1000,20 @@ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+             ring_index = bcm2838_genet_filter2ring(s, filter_index);
+         } else {
+             /*
+-             * No HFB filter match. The Linux driver configures HFB filter 0
+-             * to send all default traffic to ring 0 and only uses ring 0
+-             * for RX (with NAPI). Use ring 0 as default when HFB is not
+-             * implemented.
++             * No HFB filter match. Determine the active default ring:
++             * - Linux driver uses ring 0 (HFB filter 0 directs default
++             *   traffic there, NAPI only runs on ring 0)
++             * - U-Boot uses ring 16 (DESC_INDEX, the hardware default)
++             *
++             * Check which ring has descriptors configured (non-zero
++             * start/end addresses indicate the ring is set up).
+              */
+-            ring_index = 0;
++            if (s->regs.rdma.rings[0].start_addr != 0 ||
++                s->regs.rdma.rings[0].end_addr != 0) {
++                ring_index = 0;
++            } else {
++                ring_index = BCM2838_GENET_DMA_RING_CNT - 1;
++            }
+         }
+ 
+         if (size <= MAX_PACKET_SIZE) {
+-- 
+2.47.3
+

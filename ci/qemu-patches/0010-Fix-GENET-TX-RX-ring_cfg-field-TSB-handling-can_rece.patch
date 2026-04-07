@@ -1,0 +1,129 @@
+From 96773a8c9824b02382ea3e1ce47ffa51ba91fed2 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 6 Apr 2026 19:38:54 +0930
+Subject: [PATCH 10/16] Fix GENET TX/RX: ring_cfg field, TSB handling,
+ can_receive, flush
+
+Three critical bugs fixed:
+
+1. ring_cfg field extraction: bcm2838_genet_tdma_ring_active() used
+   GENET_DMA_CTRL (1-bit EN) instead of GENET_DMA_RING_CFG (17-bit EN)
+   to check ring enable status, causing ring 16 (default queue) to
+   always appear disabled.
+
+2. TSB stripping: xmit_packet unconditionally stripped 52-byte TSB
+   header, but U-Boot doesn't prepend TSB. Now checks TSB_SWAP_EN.
+
+3. can_receive always returns true + flush on RDMA enable.
+
+Result: Bidirectional packet flow confirmed via traces (6 TX BOOTP,
+6 RX DHCP responses). Full DHCP still pending RDMA descriptor work.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 42 ++++++++++++++++++++++++++++++++++++------
+ 1 file changed, 36 insertions(+), 6 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index a2cee9388..cf6b082f7 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -394,14 +394,25 @@ static uint64_t bcm2838_genet_mdio_cmd(BCM2838GenetState *s, uint64_t cmd)
+     return cmd;
+ }
+ 
+-static void bcm2838_genet_xmit_packet(NetClientState *s, void *packet,
++static void bcm2838_genet_xmit_packet(BCM2838GenetState *gs,
++                                      NetClientState *s, void *packet,
+                                       size_t size)
+ {
+-    uint8_t *buf = packet + sizeof(BCM2838GenetXmitStatus);
++    uint8_t *buf = packet;
+     size_t len = size;
+     uint16_t len_type = 0;
++    bool tsb_en = FIELD_EX32(gs->regs.tdma.ctrl, GENET_DMA_CTRL,
++                             TSB_SWAP_EN) != 0;
++
++    /*
++     * If TSB (Transmit Status Block) is prepended, skip it.
++     * Linux enables TSB_SWAP_EN; U-Boot does not.
++     */
++    if (tsb_en && len > sizeof(BCM2838GenetXmitStatus)) {
++        buf += sizeof(BCM2838GenetXmitStatus);
++        len -= sizeof(BCM2838GenetXmitStatus);
++    }
+ 
+-    len -= sizeof(BCM2838GenetXmitStatus);
+     net_checksum_calculate(buf, len, CSUM_ALL);
+ 
+     memcpy(&len_type, &buf[12], sizeof(len_type));
+@@ -473,8 +484,8 @@ static uint64_t bcm2838_genet_tx(BCM2838GenetState *s, unsigned int ring_index,
+         packet_off += buflength;
+ 
+         if (FIELD_EX32(desc_status, GENET_RDMA_LENGTH_STATUS, EOP) != 0) {
+-            bcm2838_genet_xmit_packet(qemu_get_queue(s->nic), s->tx_packet,
+-                                                     packet_off);
++            bcm2838_genet_xmit_packet(s, qemu_get_queue(s->nic),
++                                      s->tx_packet, packet_off);
+             packet_off = 0;
+         }
+ 
+@@ -501,7 +512,7 @@ static bool bcm2838_genet_tdma_ring_active(BCM2838GenetState *s,
+     uint32_t ring_mask = 1 << ring_index;
+     bool dma_en = FIELD_EX32(ctrl_reg, GENET_DMA_CTRL, EN) != 0;
+     bool ring_en =
+-        (FIELD_EX32(ring_cfg_reg, GENET_DMA_CTRL, EN) & ring_mask) != 0;
++        (FIELD_EX32(ring_cfg_reg, GENET_DMA_RING_CFG, EN) & ring_mask) != 0;
+     bool ring_buf_en =
+         (FIELD_EX32(ctrl_reg, GENET_DMA_CTRL, RING_BUF_EN) & ring_mask) != 0;
+     bool active = dma_en && ring_en && ring_buf_en;
+@@ -738,6 +749,11 @@ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+                     s->regs.rdma.status = 0xFFFFFFFF;
+                 } else {
+                     s->regs.rdma.status = 0;
++                    /*
++                     * RDMA just enabled -- flush any queued packets from
++                     * the network backend so they get delivered now.
++                     */
++                    qemu_flush_queued_packets(qemu_get_queue(s->nic));
+                 }
+             }
+             break;
+@@ -925,6 +941,17 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+     return len;
+ }
+ 
++static bool bcm2838_genet_can_receive(NetClientState *nc)
++{
++    /*
++     * Always accept packets. If RDMA is not yet enabled, bcm2838_genet_receive
++     * will return 0 causing the packet to be dropped, but this prevents SLIRP
++     * from permanently stalling when it tries to send a response before the
++     * guest has enabled RDMA.
++     */
++    return true;
++}
++
+ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+                                      size_t size)
+ {
+@@ -933,6 +960,8 @@ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+     int32_t filter_index = -1;
+     int32_t ring_index = -1;
+ 
++    trace_bcm2838_genet_receive((ssize_t)size);
++
+     if (FIELD_EX32(s->regs.rdma.ctrl, GENET_DMA_CTRL, EN) != 0) {
+         filter_index = bcm2838_genet_filter(s, buf, size);
+ 
+@@ -1007,6 +1036,7 @@ static void bcm2838_genet_set_link(NetClientState *nc)
+ static NetClientInfo bcm2838_genet_client_info = {
+     .type = NET_CLIENT_DRIVER_NIC,
+     .size = sizeof(NICState),
++    .can_receive = bcm2838_genet_can_receive,
+     .receive = bcm2838_genet_receive,
+     .link_status_changed = bcm2838_genet_set_link,
+ };
+-- 
+2.47.3
+
