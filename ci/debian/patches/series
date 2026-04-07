@@ -14,3 +14,4 @@
 0014-Fix-GENET-RX-use-ring-0-as-default-receive-queue.patch
 0015-Fix-GENET-RX-auto-detect-default-ring-based-on-descr.patch
 0016-PL011-auto-re-enable-UART-on-DR-write-when-UARTEN-is.patch
+0017-skip-unpack-edk2-blobs.patch
