@@ -12,7 +12,8 @@ End-to-end test of Raspberry Pi 4B emulation in QEMU with GENET Ethernet:
 All in a single QEMU instance with zero human interaction.
 
 Prerequisites:
-  - Custom QEMU v11 with GENET patches: upstream-qemu/build/qemu-system-aarch64
+  - QEMU with GENET patches: install qemu-rpi-system-arm package,
+    or set QEMU_OVERRIDE env var to a custom binary path
   - U-Boot built with rpi_4_qemu_defconfig: test-images/u-boot/u-boot.bin
   - Stock RPi kernel (uncompressed): test-images/tftpboot/Image
   - BCM2711 device tree: test-images/tftpboot/bcm2711-rpi-4-b.dtb
@@ -30,12 +31,10 @@ import time
 from pathlib import Path
 
 BASE = Path(__file__).parent.resolve()
-# QEMU binary: prefer QEMU_OVERRIDE env var, then local build, then APT-installed
+# QEMU binary: QEMU_OVERRIDE env var, or APT-installed qemu-rpi-system-aarch64
 _qemu_override = os.environ.get("QEMU_OVERRIDE")
 if _qemu_override:
     QEMU = Path(_qemu_override)
-elif (BASE / "upstream-qemu" / "build" / "qemu-system-aarch64").exists():
-    QEMU = BASE / "upstream-qemu" / "build" / "qemu-system-aarch64"
 else:
     QEMU = Path(shutil.which("qemu-rpi-system-aarch64") or
                 "qemu-rpi-system-aarch64")
