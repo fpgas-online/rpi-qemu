@@ -126,6 +126,8 @@ jobs:
             --disable-spice \
             --disable-xen \
             --disable-werror \
+            --disable-guest-agent \
+            --disable-tools \
             --firmwarepath=
           ninja -j$(nproc)
 

@@ -1,3 +1,13 @@
-# Files produced by the build but not needed in our packages
+# Files produced by the build but not needed in our qemu-rpi packages.
+# We only ship qemu-rpi-system-aarch64 and its data files.
+usr/bin/qemu-edid
+usr/bin/qemu-ga
+usr/bin/qemu-img
+usr/bin/qemu-io
+usr/bin/qemu-nbd
+usr/bin/qemu-pr-helper
+usr/bin/qemu-storage-daemon
+usr/bin/qemu-vmsr-helper
 usr/include/qemu-plugin.h
 usr/lib/qemu-rpi/qemu-bridge-helper
+usr/share/man
