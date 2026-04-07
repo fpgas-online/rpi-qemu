@@ -40,7 +40,8 @@ jobs:
       - name: Install remaining dependencies
         run: |
           apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu make bc bison flex \
+            build-essential gcc-aarch64-linux-gnu \
+            make bc bison flex libssl-dev \
             cpio wget python3
 
       - name: Cache U-Boot build
