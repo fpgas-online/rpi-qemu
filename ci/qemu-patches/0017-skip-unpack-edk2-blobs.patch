@@ -1,19 +1,41 @@
 From: Michael Tokarev <mjt@tls.msk.ru>
-Subject: skip unpacking of edk2 blobs
+Subject: skip firmware blobs stripped from Debian +ds tarball
 Date: Sat, 01 Apr 2023 18:46:55 +0300
 Debian-Specific: yes
 Forwarded: not-needed
 
-Debian strips the blobs from qemu.orig.tar.gz so the code
-fails to unpack the missing files.
+Debian strips firmware blobs from qemu.orig.tar.gz so references
+to the missing files fail during configure. This patch:
+- Disables edk2 blob unpacking
+- Only installs firmware blobs that actually exist on disk
+- Skips dtb subdirectory (dtbs also stripped from +ds tarball)
+
+Based on skip-unpack-edk2-blobs.patch and skip-install-dtb.patch
+from the Debian qemu packaging.
 
 diff --git a/pc-bios/meson.build b/pc-bios/meson.build
-index a7224ef469..ddaedd95af 100644
 --- a/pc-bios/meson.build
 +++ b/pc-bios/meson.build
-@@ -1,4 +1,4 @@
+@@ -1,5 +1,5 @@
  roms = []
 -if unpack_edk2_blobs
 +if unpack_edk2_blobs and false
    fds = [
      'edk2-aarch64-code.fd',
+     'edk2-arm-code.fd',
+@@ -86,9 +86,13 @@
+ ]
+
+ if get_option('install_blobs')
+-  install_data(blobs, install_dir: qemu_datadir, install_mode: 'rw-r--r--')
++  foreach b : blobs
++    if fs.exists(b)
++      install_data(b, install_dir: qemu_datadir, install_mode: 'rw-r--r--')
++    endif
++  endforeach
+ endif
+
+ subdir('descriptors')
+-subdir('dtb')
++#subdir('dtb')
+ subdir('keymaps')
