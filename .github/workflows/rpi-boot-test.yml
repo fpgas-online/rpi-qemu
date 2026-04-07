@@ -9,23 +9,29 @@ on:
 jobs:
   boot-test:
     runs-on: ubuntu-latest
+    container: debian:trixie
     timeout-minutes: 45
     # Only run if the package build succeeded
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
 
     steps:
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install QEMU from APT repo
         run: |
           echo "=== Adding QEMU RPi APT repository ==="
-          echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
-            sudo tee /etc/apt/sources.list.d/qemu-rpi.list
-          sudo apt-get update
+          echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" \
+            > /etc/apt/sources.list.d/qemu-rpi.list
+          apt-get update
 
           echo "=== Installing qemu-rpi-system-arm ==="
-          sudo apt-get install -y qemu-rpi-system-arm
+          apt-get install -y qemu-rpi-system-arm
 
           echo "=== Installed ==="
           which qemu-rpi-system-aarch64
@@ -33,8 +39,9 @@ jobs:
 
       - name: Install remaining dependencies
         run: |
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu cpio wget
+          apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu make bc bison flex \
+            cpio wget python3
 
       - name: Cache U-Boot build
         id: cache-uboot
@@ -78,23 +85,23 @@ jobs:
         run: |
           mkdir -p test-images/tftpboot
           git clone --depth=1 --filter=blob:none --sparse \
-            https://github.com/raspberrypi/firmware.git /tmp/rpi-fw
-          cd /tmp/rpi-fw
+            https://github.com/raspberrypi/firmware.git /rpi-fw
+          cd /rpi-fw
           git sparse-checkout set boot/kernel8.img boot/bcm2711-rpi-4-b.dtb
           cd -
-          cp /tmp/rpi-fw/boot/kernel8.img test-images/kernel8.img
-          cp /tmp/rpi-fw/boot/bcm2711-rpi-4-b.dtb test-images/bcm2711-rpi-4-b.dtb
+          cp /rpi-fw/boot/kernel8.img test-images/kernel8.img
+          cp /rpi-fw/boot/bcm2711-rpi-4-b.dtb test-images/bcm2711-rpi-4-b.dtb
           cp test-images/bcm2711-rpi-4-b.dtb test-images/tftpboot/
           gunzip -k -f test-images/kernel8.img
           mv test-images/kernel8 test-images/tftpboot/Image
-          rm -rf /tmp/rpi-fw
+          rm -rf /rpi-fw
 
       - name: Download Alpine and build initramfs
         run: |
           mkdir -p test-images
           wget -q -O test-images/alpine-minirootfs.tar.gz \
             "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.3-aarch64.tar.gz"
-          sudo python3 build-initramfs.py
+          python3 build-initramfs.py
           mkdir -p test-images/tftpboot
           cp test-images/test-initramfs.cpio.gz test-images/tftpboot/initrd.gz
 
