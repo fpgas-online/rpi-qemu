@@ -55,9 +55,24 @@ ping -c 3 -W 3 10.0.2.2 2>&1 || echo "Ping gateway failed"
 echo "=== Pinging 8.8.8.8 (Google DNS) ==="
 ping -c 3 -W 5 8.8.8.8 2>&1 || echo "Ping 8.8.8.8 failed"
 
+# Test DNS resolution
+echo "=== DNS resolution test ==="
+nslookup www.google.com 2>&1 || echo "DNS resolution failed"
+
+# Ensure shared libraries are findable
+export LD_LIBRARY_PATH=/usr/lib:/lib
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# Test HTTPS fetch
+echo "=== Fetching https://www.google.com ==="
+# Note: certificate verification may fail in QEMU due to system time
+# not matching certificate validity window. The TLS connection itself
+# (encryption, handshake) still works correctly.
+wget --no-check-certificate -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || echo "HTTPS fetch: FAILED"
+
 # Show dmesg for GENET
 echo "=== dmesg genet ==="
-dmesg 2>&1 | grep -i "genet\|Link is" | tail -5
+dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5
 
 echo "=== Network test complete ==="
 
