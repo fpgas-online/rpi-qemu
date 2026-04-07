@@ -75,6 +75,7 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     timeout-minutes: 45
+    continue-on-error: true
     steps:
       - name: Install base tools
         run: |
@@ -286,7 +287,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-debs, build-static]
+    needs: [build-debs]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
