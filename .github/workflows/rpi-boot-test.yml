@@ -86,13 +86,11 @@ jobs:
         run: |
           mkdir -p test-images/tftpboot
           FW_BASE="https://raw.githubusercontent.com/raspberrypi/firmware/master/boot"
-          wget -q -O test-images/kernel8.img.gz "$FW_BASE/kernel8.img"
+          wget -q -O test-images/kernel8.img "$FW_BASE/kernel8.img"
           wget -q -O test-images/bcm2711-rpi-4-b.dtb "$FW_BASE/bcm2711-rpi-4-b.dtb"
           cp test-images/bcm2711-rpi-4-b.dtb test-images/tftpboot/
-          # kernel8.img is gzip-compressed; decompress to get the raw Image
-          cp test-images/kernel8.img.gz test-images/kernel8.img
-          gunzip test-images/kernel8.img.gz
-          mv test-images/kernel8.img test-images/tftpboot/Image
+          # kernel8.img is gzip-compressed; decompress with zcat to get raw Image
+          zcat test-images/kernel8.img > test-images/tftpboot/Image
 
       - name: Download Alpine and build initramfs
         run: |
