@@ -53,7 +53,7 @@ CONFIGURE_OPTS = \
 
 override_dh_auto_configure:
 	mkdir -p $(BUILDDIR)
-	cd $(BUILDDIR) && ../configure $(CONFIGURE_OPTS)
+	cd $(BUILDDIR) && ../configure $(CONFIGURE_OPTS) --meson=meson
 
 override_dh_auto_build:
 	$(NINJA) -C $(BUILDDIR)

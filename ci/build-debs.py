@@ -99,12 +99,13 @@ def main():
     env = os.environ.copy()
     env["DEB_BUILD_OPTIONS"] = f"parallel={os.cpu_count() or 4} nocheck"
 
-    run(["dpkg-buildpackage", "-us", "-uc", "-b"],
+    # -d: skip dependency checking (we install deps ourselves)
+    run(["dpkg-buildpackage", "-us", "-uc", "-d", "-b"],
         cwd=source_dir, check=True)
 
     # Also build source-only package
     print(f"\n=== Building source package ===")
-    run(["dpkg-buildpackage", "-us", "-uc", "-S"],
+    run(["dpkg-buildpackage", "-us", "-uc", "-d", "-S"],
         cwd=source_dir, check=True)
 
     # Step 6: Collect output files
