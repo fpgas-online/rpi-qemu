@@ -1,0 +1,60 @@
+# U-Boot config for QEMU raspi4b PXE boot (VideoCore emulation)
+# Based on rpi_4_qemu_defconfig with:
+#   - Instant boot (no delay, no prompt)
+#   - Embedded VideoCore boot script via pxeboot.env
+#   - Silent U-Boot console (only VC messages + Linux output visible)
+CONFIG_ARM=y
+CONFIG_ARCH_BCM283X=y
+CONFIG_TEXT_BASE=0x00080000
+CONFIG_TARGET_RPI_4=y
+CONFIG_HAS_CUSTOM_SYS_INIT_SP_ADDR=y
+CONFIG_CUSTOM_SYS_INIT_SP_ADDR=0x7fffe30
+CONFIG_ENV_SIZE=0x4000
+CONFIG_DEFAULT_DEVICE_TREE="bcm2711-rpi-4-b"
+CONFIG_OF_LIBFDT_OVERLAY=y
+CONFIG_DM_RESET=y
+CONFIG_SYS_LOAD_ADDR=0x1000000
+# --- PXE boot specific ---
+# Boot immediately with no delay or abort check
+CONFIG_BOOTDELAY=-2
+# Run the VideoCore emulation script on boot
+CONFIG_BOOTCOMMAND="run vc_boot"
+# Load environment from ci/vc-boot-pi4b.env (copied to board/raspberrypi/rpi/pxeboot.env)
+CONFIG_ENV_SOURCE_FILE="pxeboot"
+# Silent console support (requires NULLDEV)
+CONFIG_SYS_DEVICE_NULLDEV=y
+# --- Disabled features (same as rpi_4_qemu_defconfig) ---
+# CONFIG_PCI is not set
+# CONFIG_EFI_LOADER is not set
+# CONFIG_EFI_RUNTIME_UPDATE_CAPSULE is not set
+# CONFIG_EFI_CAPSULE_FIRMWARE_RAW is not set
+CONFIG_BOOTSTD_DEFAULTS=y
+CONFIG_OF_BOARD_SETUP=y
+CONFIG_FDT_SIMPLEFB=y
+# CONFIG_USE_PREBOOT is not set
+CONFIG_SYS_PBSIZE=1049
+# CONFIG_DISPLAY_CPUINFO is not set
+# CONFIG_DISPLAY_BOARDINFO is not set
+CONFIG_MISC_INIT_R=y
+CONFIG_SYS_PROMPT=""
+CONFIG_CMD_GPIO=y
+CONFIG_CMD_MMC=y
+CONFIG_CMD_FS_UUID=y
+CONFIG_ENV_FAT_DEVICE_AND_PART="0:1"
+CONFIG_ENV_RELOC_GD_ENV_ADDR=y
+CONFIG_ENV_VARS_UBOOT_RUNTIME_CONFIG=y
+CONFIG_TFTP_TSIZE=y
+CONFIG_DM_DMA=y
+CONFIG_BCM2835_GPIO=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_SDMA=y
+CONFIG_MMC_SDHCI_BCM2835=y
+CONFIG_BCMGENET=y
+CONFIG_PINCTRL=y
+# CONFIG_PINCTRL_GENERIC is not set
+# CONFIG_USB is not set
+# CONFIG_USB_XHCI_HCD is not set
+# CONFIG_VIDEO is not set
+CONFIG_PHYS_TO_BUS=y
+# CONFIG_HEXDUMP is not set
+# CONFIG_REQUIRE_SERIAL_CONSOLE is not set
