@@ -95,18 +95,15 @@ jobs:
             libglib2.0-dev libfdt-dev zlib1g-dev libzstd-dev \
             wget xz-utils
 
-      - name: Download and patch QEMU
+      - name: Clone and patch QEMU
         run: |
-          mkdir -p tmp/qemu-static-src
-          wget -q -O tmp/qemu-static.tar.xz \
-            "https://deb.debian.org/debian/pool/main/q/qemu/qemu_11.0.0~rc2+ds.orig.tar.xz"
-          tar xf tmp/qemu-static.tar.xz -C tmp/qemu-static-src --strip-components=1
-          rm tmp/qemu-static.tar.xz
-
+          # Use git clone (not Debian +ds tarball) so subprojects/slirp is available
+          git clone --depth=1 --branch v11.0.0-rc2 \
+            https://gitlab.com/qemu-project/qemu.git tmp/qemu-static-src
           cd tmp/qemu-static-src
-          for p in ../../ci/qemu-patches/*.patch; do
+          # Apply GENET patches (skip the Debian-specific edk2/dtb patch)
+          for p in ../../ci/qemu-patches/00{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16}*.patch; do
             echo "Applying: $(basename $p)"
-            git init -q . 2>/dev/null || true
             git apply "$p"
           done
 
@@ -117,7 +114,7 @@ jobs:
           ../configure \
             --target-list=aarch64-softmmu \
             --static \
-            --enable-slirp=internal \
+            --enable-slirp \
             --disable-pixman \
             --disable-capstone \
             --disable-docs \
