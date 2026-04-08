@@ -93,7 +93,7 @@ jobs:
             meson ninja-build pkgconf \
             python3 python3-venv python3-setuptools python3-pip python3-pycotap \
             libglib2.0-dev libfdt-dev zlib1g-dev libzstd-dev \
-            wget xz-utils
+            wget xz-utils file
 
       - name: Clone and patch QEMU
         run: |
