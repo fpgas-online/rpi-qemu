@@ -167,6 +167,11 @@ def run_test():
         print("--- Phase 3: FDT setup + booti ---")
         send(f"fdt addr 0x{DTB_ADDR:x}", 2)
         send("fdt resize 8192", 2)
+        # Fix serial aliases: RPi firmware DTB has serial0→mini-UART,
+        # serial1→PL011 (for Bluetooth). Restore serial0→PL011 so
+        # console=ttyAMA0 works.
+        send("fdt set /aliases serial0 /soc/serial@7e201000", 2)
+        send("fdt set /aliases serial1 /soc/serial@7e215040", 2)
         send(f'setenv bootargs "{BOOTARGS}"', 2)
         # Note: ${filesize} is set by the LAST tftpboot (initrd.gz)
         send(f"booti 0x{KERNEL_ADDR:x} 0x{INITRD_ADDR:x}:${{filesize}} 0x{DTB_ADDR:x}", 3)
