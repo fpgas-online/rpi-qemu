@@ -1,0 +1,63 @@
+From 1dd06cdec2b439fe2edd3b427a8d689b37f2b827 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Wed, 8 Apr 2026 23:11:43 +0930
+Subject: [PATCH] raspi4b: fix serial aliases so PL011 is ttyAMA0
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Raspberry Pi firmware DTB swaps serial0/serial1 aliases so
+that serial0 points to the mini-UART (GPIO header console) and
+serial1 points to the PL011 (Bluetooth).  QEMU does not emulate
+Bluetooth and the PL011 is connected to the QEMU serial port, so
+restore the natural mapping in raspi4_modify_dtb():
+
+  serial0 → /soc/serial@7e201000  (PL011, uart0)
+  serial1 → /soc/serial@7e215040  (mini-UART, uart1)
+
+This makes console=ttyAMA0 work out of the box, matching what
+users expect and eliminating the need for the non-obvious
+console=ttyAMA1 workaround.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/arm/raspi4b.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/hw/arm/raspi4b.c b/hw/arm/raspi4b.c
+index b9430309a..6b4f6e554 100644
+--- a/hw/arm/raspi4b.c
++++ b/hw/arm/raspi4b.c
+@@ -61,10 +61,29 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
+ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
+ {
+     uint64_t ram_size = board_ram_size(info->board_id);
++    int offset;
+ 
+     if (info->ram_size > UPPER_RAM_BASE) {
+         raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
+     }
++
++    /*
++     * Fix serial aliases: ensure PL011 (uart0) is serial0.
++     *
++     * The Raspberry Pi firmware DTB swaps the serial aliases so that
++     * serial0 points to the mini-UART (for the GPIO header console)
++     * and serial1 points to the PL011 (used for Bluetooth on real
++     * hardware).  QEMU does not emulate Bluetooth and the PL011 is
++     * connected to the QEMU serial port, so restore the natural
++     * mapping so that console=ttyAMA0 works as expected.
++     */
++    offset = fdt_path_offset(fdt, "/aliases");
++    if (offset >= 0) {
++        fdt_setprop_string(fdt, offset,
++                           "serial0", "/soc/serial@7e201000");
++        fdt_setprop_string(fdt, offset,
++                           "serial1", "/soc/serial@7e215040");
++    }
+ }
+ 
+ static void raspi4b_machine_init(MachineState *machine)
+-- 
+2.47.3
+

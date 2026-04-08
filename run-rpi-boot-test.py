@@ -49,7 +49,7 @@ DTB_ADDR    = 0x0f000000   # 240 MB - device tree
 INITRD_ADDR = 0x12000000   # 288 MB - initramfs
 
 # Kernel boot parameters
-BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA1 loglevel=4 rdinit=/init"
+BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=4 rdinit=/init"
 
 
 def check_prerequisites():

@@ -100,7 +100,7 @@ def setup_tftpboot():
     cmdline = serial_dir / "cmdline.txt"
     if not cmdline.exists():
         cmdline.write_text(
-            "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA1 "
+            "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 "
             "loglevel=4 rdinit=/init\n"
         )
 

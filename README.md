@@ -63,14 +63,12 @@ The simplest way to test -- load a kernel and initramfs directly:
 ```bash
 qemu-rpi-system-aarch64 -M raspi4b \
   -kernel Image -dtb bcm2711-rpi-4-b.dtb -initrd initrd.gz \
-  -append "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA1 rdinit=/init" \
+  -append "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 rdinit=/init" \
   -nic user \
   -serial stdio -display none
 ```
 
 The emulated Pi gets a DHCP address via QEMU user-mode networking and can reach the internet. Get `Image` and `bcm2711-rpi-4-b.dtb` from the [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot) repo.
-
-> **Note:** The stock RPi kernel uses `console=ttyAMA1` (not `ttyAMA0`). Use this in your kernel command line or you won't see any output.
 
 ### PXE Network Boot
 
@@ -135,7 +133,6 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 - **No GPU.** `start4.elf` is fetched but not executed. No HDMI, no hardware video decode.
 - **No USB.** QEMU's raspi4b doesn't emulate the USB controller.
 - **User-mode networking only.** Uses QEMU's built-in NAT. No bridged/tap networking tested.
-- **Console is `ttyAMA1`.** Use `console=ttyAMA1` in your kernel command line (not `ttyAMA0`).
 
 ---
 
@@ -145,7 +142,7 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 
 ```
 ci/
-  qemu-patches/          16 patches adding GENET Ethernet to QEMU v11.0.0-rc2
+  qemu-patches/          17 patches adding GENET Ethernet to QEMU v11.0.0-rc2
   debian/                Debian packaging for qemu-rpi-* packages
   vc-boot-pi4b.env       VideoCore boot emulation script (U-Boot environment)
   rpi_4_qemu_defconfig   U-Boot config for interactive testing
@@ -160,13 +157,14 @@ run-rpi-pxeboot-test.py  Autonomous PXE boot test
 
 ### QEMU Patches
 
-16 patches on top of QEMU v11.0.0-rc2 (from Debian experimental), ported from Sergey Kambalin's Kambalin v6 series:
+17 patches on top of QEMU v11.0.0-rc2 (from Debian experimental), ported from Sergey Kambalin's Kambalin v6 series:
 
 - **BCM2838 GENET Ethernet** -- Full DMA-based GbE MAC with MDIO/PHY, TX/RX descriptor rings
 - **BCM2838 PCIe Root Complex** -- Basic PCIe host bridge
 - **BCM2838 RNG200** -- Hardware random number generator
 - **BCM2838 Thermal Sensor** -- Temperature monitoring
 - **PL011 UART fix** -- Re-enable UART after U-Boot handoff
+- **Serial alias fix** -- PL011 is `ttyAMA0`, matching expected behavior
 
 ### U-Boot Configuration
 
