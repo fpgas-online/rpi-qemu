@@ -115,6 +115,7 @@ jobs:
           ../configure \
             --target-list=aarch64-softmmu \
             --static \
+            -Ddefault_library=static \
             --enable-slirp \
             --disable-pixman \
             --disable-capstone \
