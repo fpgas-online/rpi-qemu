@@ -1,3 +1,12 @@
+qemu-rpi (1:11.0.0~rc2+ds-2+rpi2) trixie; urgency=medium
+
+  * Add qemu-rpi-pxeboot package: PXE boot firmware for QEMU raspi4b
+    that emulates the VideoCore GPU bootloader's TFTP probe sequence.
+  * Firmware boots autonomously with VideoCore-style UART output.
+  * Supports config.txt parsing (kernel=/device_tree= overrides).
+
+ -- Tim Ansell <mithro@mithis.com>  Tue, 08 Apr 2026 12:00:00 +0930
+
 qemu-rpi (1:11.0.0~rc2+ds-2+rpi1) trixie; urgency=medium
 
   * Custom QEMU build with Raspberry Pi 4B GENET Ethernet support.

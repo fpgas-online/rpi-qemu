@@ -42,3 +42,21 @@ Description: QEMU RPi data files (firmware, keymaps, etc.)
  .
  Contains firmware blobs, keymaps, and other architecture-independent
  files for the QEMU RPi build.
+
+Package: qemu-rpi-pxeboot
+Architecture: all
+Depends: ${misc:Depends}
+Recommends: qemu-rpi-system-arm
+Description: PXE network boot emulation for QEMU Raspberry Pi 4B
+ Enables QEMU's raspi4b machine to PXE network boot from a standard
+ Raspberry Pi TFTP server layout, reproducing the same DHCP options,
+ TFTP probe sequence, config.txt parsing, and kernel loading behaviour
+ as real Pi 4B hardware.
+ .
+ Point QEMU at a TFTP root containing your Pi OS files and it boots
+ them the same way a physical Raspberry Pi would.
+ .
+ Usage: qemu-rpi-system-aarch64 -M raspi4b
+   -kernel /usr/share/qemu-rpi-pxeboot/rpi4b-pxeboot.bin
+   -dtb /usr/share/qemu-rpi-pxeboot/rpi4b-pxeboot.dtb
+   -nic user,tftp=/srv/tftpboot -serial stdio
