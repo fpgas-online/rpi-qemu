@@ -7,6 +7,8 @@ on:
       - 'ci/qemu-patches/**'
       - 'ci/debian/**'
       - 'ci/build-debs.py'
+      - 'ci/vc-boot-pi4b.env'
+      - 'ci/rpi_4_qemu_pxeboot_defconfig'
       - '.github/workflows/build-qemu-packages.yml'
   workflow_dispatch:
 
@@ -154,9 +156,57 @@ jobs:
             tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz
           retention-days: 90
 
+  build-pxeboot:
+    name: Build PXE boot firmware
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    timeout-minutes: 30
+    steps:
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu \
+            make bc bison flex libssl-dev \
+            python3 python3-setuptools python3-dev
+
+      - name: Build PXE boot firmware
+        run: |
+          git clone --depth=100 https://github.com/u-boot/u-boot.git tmp/u-boot-pxeboot
+          cd tmp/u-boot-pxeboot
+          git checkout 47e064f13171f15817aa1b22b04e309964b15c2c
+          cp ../../ci/rpi_4_qemu_pxeboot_defconfig configs/
+          cp ../../ci/vc-boot-pi4b.env board/raspberrypi/rpi/pxeboot.env
+          make rpi_4_qemu_pxeboot_defconfig
+          make -j$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
+
+          echo "=== Firmware built ==="
+          ls -lh u-boot.bin
+
+      - name: Package firmware
+        run: |
+          mkdir -p tmp/pxeboot-output
+          cp tmp/u-boot-pxeboot/u-boot.bin tmp/pxeboot-output/rpi4b-pxeboot.bin
+          cp tmp/u-boot-pxeboot/arch/arm/dts/bcm2711-rpi-4-b.dtb tmp/pxeboot-output/rpi4b-pxeboot.dtb
+          ls -lh tmp/pxeboot-output/
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-rpi-pxeboot
+          path: tmp/pxeboot-output/
+          retention-days: 90
+
   publish-apt-repo:
     name: Publish APT repository
-    needs: [build-debs]
+    needs: [build-debs, build-pxeboot]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -169,7 +219,34 @@ jobs:
           name: qemu-rpi-debs
           path: tmp/debs/
 
-      - name: List downloaded artifacts
+      - name: Download pxeboot firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-pxeboot
+          path: tmp/pxeboot-firmware/
+
+      - name: Build pxeboot deb
+        run: |
+          PKG=tmp/pxeboot-pkg
+          mkdir -p $PKG/usr/share/qemu-rpi-pxeboot
+          cp tmp/pxeboot-firmware/rpi4b-pxeboot.bin $PKG/usr/share/qemu-rpi-pxeboot/
+          cp tmp/pxeboot-firmware/rpi4b-pxeboot.dtb $PKG/usr/share/qemu-rpi-pxeboot/
+
+          mkdir -p $PKG/DEBIAN
+          cat > $PKG/DEBIAN/control <<'CTRL'
+          Package: qemu-rpi-pxeboot
+          Version: 0.1
+          Architecture: all
+          Maintainer: Tim Ansell <mithro@mithis.com>
+          Recommends: qemu-rpi-system-arm
+          Description: PXE network boot emulation for QEMU Raspberry Pi 4B
+           Enables QEMU raspi4b to PXE boot from a standard RPi TFTP layout.
+          CTRL
+          sed -i 's/^          //' $PKG/DEBIAN/control
+
+          dpkg-deb --build $PKG tmp/debs/qemu-rpi-pxeboot_0.1_all.deb
+
+      - name: List all artifacts
         run: ls -lh tmp/debs/
 
       - name: Import GPG key
@@ -287,7 +364,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-debs]
+    needs: [build-debs, build-pxeboot]
     runs-on: ubuntu-latest
     continue-on-error: true
     if: github.ref == 'refs/heads/main'
