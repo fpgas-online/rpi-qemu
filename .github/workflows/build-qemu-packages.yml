@@ -92,9 +92,7 @@ jobs:
             build-essential \
             meson ninja-build pkgconf \
             python3 python3-venv python3-setuptools python3-pip python3-pycotap \
-            libglib2.0-dev libpixman-1-dev libslirp-dev \
-            libcapstone-dev libfdt-dev zlib1g-dev libzstd-dev \
-            libmount-dev \
+            libglib2.0-dev libfdt-dev zlib1g-dev libzstd-dev \
             wget xz-utils
 
       - name: Download and patch QEMU
@@ -119,7 +117,9 @@ jobs:
           ../configure \
             --target-list=aarch64-softmmu \
             --static \
-            --enable-slirp \
+            --enable-slirp=internal \
+            --disable-pixman \
+            --disable-capstone \
             --disable-docs \
             --disable-gtk \
             --disable-sdl \
@@ -130,10 +130,8 @@ jobs:
             --disable-werror \
             --disable-guest-agent \
             --disable-tools \
+            --disable-gio \
             --firmwarepath=
-          # Build only the system emulator binary -- test binaries fail
-          # to link statically because Debian doesn't ship static versions
-          # of libmount and libpixman.
           ninja -j$(nproc) qemu-system-aarch64
 
           echo "=== Static binary ==="
