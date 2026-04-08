@@ -3,13 +3,6 @@ name: Build QEMU RPi Packages
 on:
   push:
     branches: [main]
-    paths:
-      - 'ci/qemu-patches/**'
-      - 'ci/debian/**'
-      - 'ci/build-debs.py'
-      - 'ci/vc-boot-pi4b.env'
-      - 'ci/rpi_4_qemu_pxeboot_defconfig'
-      - '.github/workflows/build-qemu-packages.yml'
   workflow_dispatch:
 
 permissions:
