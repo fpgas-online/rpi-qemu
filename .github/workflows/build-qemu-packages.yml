@@ -101,8 +101,9 @@ jobs:
           git clone --depth=1 --branch v11.0.0-rc2 \
             https://gitlab.com/qemu-project/qemu.git tmp/qemu-static-src
           cd tmp/qemu-static-src
-          # Apply GENET patches (skip the Debian-specific edk2/dtb patch)
-          for p in ../../ci/qemu-patches/00{01,02,03,04,05,06,07,08,09,10,11,12,13,14,15,16}*.patch; do
+          # Apply GENET patches (skip 0017 which is Debian +ds specific)
+          for p in ../../ci/qemu-patches/*.patch; do
+            case "$(basename $p)" in 0017-*) continue ;; esac
             echo "Applying: $(basename $p)"
             git apply "$p"
           done
