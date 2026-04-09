@@ -70,6 +70,20 @@ qemu-rpi-system-aarch64 -M raspi4b \
 
 The emulated Pi gets a DHCP address via QEMU user-mode networking and can reach the internet. Get `Image` and `bcm2711-rpi-4-b.dtb` from the [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot) repo.
 
+To attach USB devices (keyboard, serial, etc.) to the emulated Pi:
+
+```bash
+qemu-rpi-system-aarch64 -M raspi4b \
+  -kernel Image -dtb bcm2711-rpi-4-b.dtb -initrd initrd.gz \
+  -append "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 rdinit=/init" \
+  -nic user \
+  -device usb-kbd \
+  -chardev null,id=ser0 -device usb-serial,chardev=ser0 \
+  -serial stdio -display none
+```
+
+USB 2.0 devices attach to the DWC2 controller. The guest sees standard `/dev/ttyUSB*` serial ports and `/dev/input/*` HID devices.
+
 ### PXE Network Boot
 
 Boot from a TFTP server layout, the same way a real Pi does:
@@ -131,7 +145,7 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 
 - **Pi 4B only.** Pi 3B/3B+ use USB-attached Ethernet which QEMU doesn't emulate.
 - **No GPU.** `start4.elf` is fetched but not executed. No HDMI, no hardware video decode.
-- **No USB.** QEMU's raspi4b doesn't emulate the USB controller.
+- **No USB 3.0.** The VL805 xHCI controller (USB 3.0) requires PCIe, which isn't fully emulated. USB 2.0 works via the DWC2 controller.
 - **User-mode networking only.** Uses QEMU's built-in NAT. No bridged/tap networking tested.
 
 ---
