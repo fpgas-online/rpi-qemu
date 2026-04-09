@@ -103,6 +103,8 @@ def run_test():
          "-kernel", str(UBOOT), "-dtb", str(DTB),
          "-nic", f"user,tftp={TFTPBOOT}",
          "-device", "usb-kbd",
+         "-chardev", "null,id=usb-serial0",
+         "-device", "usb-serial,chardev=usb-serial0",
          "-serial", "stdio",
          "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -206,6 +208,7 @@ def run_test():
         ("GENET driver",        "bcmgenet"),
         ("DWC2 USB",            "dwc2"),
         ("USB device",          "USB:"),
+        ("USB serial",          "ttyUSB"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
@@ -238,7 +241,7 @@ def run_test():
         s = line.strip()
         for kw in ["DHCP client bound", "Bytes transferred",
                     "Starting kernel", "Booting Linux",
-                    "bcmgenet", "dwc2", "USB:",
+                    "bcmgenet", "dwc2", "USB:", "ttyUSB",
                     "Link is Up", "lease of",
                     "64 bytes from", "HTTPS fetch",
                     "Network test complete"]:
