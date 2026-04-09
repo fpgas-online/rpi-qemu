@@ -102,6 +102,7 @@ def run_test():
         [str(QEMU), "-M", "raspi4b",
          "-kernel", str(UBOOT), "-dtb", str(DTB),
          "-nic", f"user,tftp={TFTPBOOT}",
+         "-device", "usb-kbd",
          "-serial", "stdio",
          "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
