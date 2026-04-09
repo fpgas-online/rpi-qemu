@@ -120,6 +120,9 @@ def run_test():
         [str(QEMU), "-M", "raspi4b",
          "-kernel", str(FIRMWARE), "-dtb", str(DTB),
          "-nic", f"user,tftp={TFTPBOOT}",
+         "-device", "usb-kbd",
+         "-chardev", "null,id=usb-serial0",
+         "-device", "usb-serial,chardev=usb-serial0",
          "-serial", "stdio", "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True)
@@ -168,6 +171,9 @@ def run_test():
         ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
+        ("DWC2 USB",            "dwc2"),
+        ("USB device",          "USB:"),
+        ("USB serial",          "ttyUSB"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
@@ -199,7 +205,8 @@ def run_test():
         for kw in ["Raspberry Pi Bootloader", "Board serial",
                     "DHCP client bound", "Loading.*kernel8",
                     "Starting kernel", "Booting Linux",
-                    "bcmgenet", "Link is Up", "lease of",
+                    "bcmgenet", "dwc2", "USB:", "ttyUSB",
+                    "Link is Up", "lease of",
                     "64 bytes from", "HTTPS fetch",
                     "Network test complete"]:
             if kw in s:
