@@ -105,6 +105,7 @@ def run_test():
          "-device", "usb-kbd",
          "-chardev", "null,id=usb-serial0",
          "-device", "usb-serial,chardev=usb-serial0",
+         "-device", "usb-net",
          "-serial", "stdio",
          "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
