@@ -45,7 +45,7 @@ The stock RPi 4B kernel uses the mainline `dwc2` driver (not the out-of-tree `dw
 
 ### Implementation
 
-1. Add `-device usb-kbd,bus=dwc2-usb.0` to existing boot test QEMU command
+1. Add `-device usb-kbd` to existing boot test QEMU command (the DWC2 creates a bus named `usb-bus.0`; when only one USB bus exists, QEMU auto-selects it, so explicit `bus=` is unnecessary)
 2. Verify USB device detection in dmesg (mainline `dwc2` driver)
 3. If USB enumeration fails, debug the actual DWC2 emulation failure (do not add kernel parameter workarounds)
 4. Test `usb-serial` device: `-device usb-serial,chardev=X`
@@ -86,12 +86,13 @@ This is the highest-impact improvement: 7/8 PS1 Arty hosts and 5/5 Welland NeTV2
 **QEMU patches** (new patches added to `ci/qemu-patches/`):
 
 1. Auto-attach `usb-net` to DWC2 bus in `hw/arm/raspi.c` machine init for raspi3b/raspi3ap
-   - Follow `vmapple.c` pattern: resolve USB bus, create usb-net device, realize
-   - Wire to QEMU's NIC backend so `-nic user` works
-2. Add `select USB_NETWORK` to RASPI Kconfig (`hw/arm/Kconfig`)
-3. Connect MAC address in `hw/misc/bcm2835_property.c` (existing TODO at line 548)
+   - Use `vmapple.c` pattern for USB bus resolution: `object_resolve_type_unambiguous(TYPE_USB_BUS, ...)`
+   - For NIC wiring: use `qemu_configure_nic_device()` (not `usb_create_simple`) so the device connects to the user's `-nic user` backend. The `usb-net` device has `NICConf` / `DEFINE_NIC_PROPERTIES` so it supports netdev binding, but it must be configured before realize, following the same pattern as MMIO-attached NICs (e.g., `lan9118`), not the `usb_create_simple` pattern used for keyboards/tablets.
+2. Connect MAC address in `hw/misc/bcm2835_property.c` (existing TODO at line 548)
 
-**If DWC2 + `dwc_otg` FIQ FSM causes issues on RPi 3**: Fix the DWC2 FIQ emulation in `hcd-dwc2.c` rather than requiring kernel parameters. The `dwc_otg` driver's FIQ FSM optimization uses direct register access patterns that the emulation may not handle -- investigate and fix the specific failure.
+Note: `USB_NETWORK` in RASPI Kconfig (`hw/arm/Kconfig`) is already implicitly enabled -- `USB_NETWORK` defaults to `y` when `USB` is selected (`hw/usb/Kconfig:108`), and RASPI already selects `USB_DWC2` which selects `USB`. No Kconfig change is needed.
+
+**Expected blocker: `dwc_otg` FIQ FSM on RPi 3.** The stock RPi 3 kernel uses the out-of-tree `dwc_otg` driver (not mainline `dwc2`). QEMU's DWC2 emulation is documented as incompatible with `dwc_otg`'s FIQ-based FSM optimization (`hcd-dwc2.c:7`). This is an **expected failure**, not a conditional risk. Phase 2 must include diagnosing and fixing the DWC2 emulation to handle `dwc_otg`'s FIQ FSM register access patterns. If the FIQ emulation fix proves too complex as an initial step, switching to a mainline kernel (which uses the standard `dwc2` driver) for the QEMU test environment is acceptable -- but only as a stepping stone, not the final solution.
 
 **U-Boot configuration**:
 
@@ -118,7 +119,8 @@ Same checkpoints as raspi4b:
 ### Key files
 
 - `upstream-qemu/hw/arm/raspi.c` -- machine init (add USB-net auto-attach)
-- `upstream-qemu/hw/arm/Kconfig` -- RASPI config (add USB_NETWORK)
+- `upstream-qemu/hw/arm/Kconfig` -- RASPI config (USB_NETWORK already implicitly enabled)
+- `upstream-qemu/hw/usb/Kconfig:108` -- USB_NETWORK default y confirmation
 - `upstream-qemu/hw/misc/bcm2835_property.c:548` -- MAC address TODO
 - `upstream-qemu/hw/usb/dev-network.c` -- USB CDC/RNDIS device
 - `ci/rpi_3_qemu_defconfig` -- new U-Boot config
@@ -249,11 +251,12 @@ This is a significant advantage over RPi 4B's GENET (which had zero QEMU support
 2. `include/hw/arm/bcm2712.h` -- SoC state definition
 3. Kconfig and meson.build entries
 
-**BCM2712 PCIe root complex** (~500 lines):
+**BCM2712 PCIe root complex** (likely the dominant cost of Phase 5):
 
 4. `hw/misc/bcm2712_pcie.c` -- adapt from existing BCM2838 PCIe patches
-   - BCM2712 has 3 PCIe controllers (vs 1 on BCM2711)
-   - RP1 connects to one of them
+   - BCM2712 has 3 PCIe controllers (vs 1 on BCM2711), adding complexity
+   - RP1 connects to one of them; correct PCIe MMIO address translation is critical since all RP1 peripherals (Ethernet, UART) are accessed through PCIe-mapped registers
+   - **Risk note**: The BCM2838 PCIe patches were among the items rejected from the Kambalin v6 series during upstream QEMU review (complexity and review feedback). These patches are carried as project-local patches and will need either upstreaming or continued maintenance. The BCM2712 adaptation requires understanding and potentially fixing the BCM2838 PCIe implementation first.
 5. Wire PCIe IRQs to GIC
 
 **RP1 as PCIe device** (~1000 lines):
