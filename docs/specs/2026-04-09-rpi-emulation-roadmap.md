@@ -374,7 +374,7 @@ Each phase produces many small, discrete commits. Examples:
 - "Test: add USB device detection checkpoint"
 - "Docs: update README to document USB2 support"
 - "QEMU patch: auto-attach usb-net to raspi3b DWC2 bus"
-- "QEMU patch: add USB_NETWORK to RASPI Kconfig"
+- "QEMU patch: wire usb-net NIC to user netdev backend"
 - "CI: add rpi_3_qemu_defconfig for U-Boot"
 - "Test: parameterize boot test for raspi3b machine type"
 - "CI: add raspi3b boot test job"
