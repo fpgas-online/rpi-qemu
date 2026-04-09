@@ -33,37 +33,36 @@ The init script currently only tests network. We add USB device listing after th
 
 - [ ] **Step 1: Add USB detection block to INIT_SCRIPT**
 
-In `build-initramfs.py`, add a USB detection section after the `"Waiting for network device..."` line (after line 25 of the init script). Insert this block between the existing `sleep 2` and `# Bring up eth0`:
+In `build-initramfs.py`, add a USB detection section after the `sleep 2` at **file line 25** (between `sleep 2` and the `# Bring up eth0` comment at file line 28). Insert this block in the `INIT_SCRIPT` string:
 
-```python
-# In INIT_SCRIPT, after the "sleep 2" on init script line 25, add:
-
+```sh
 echo "=== USB Devices ==="
-# List USB bus and devices (works without usbutils via sysfs)
-if [ -d /sys/bus/usb/devices ]; then
-    for dev in /sys/bus/usb/devices/[0-9]*; do
-        [ -f "$dev/idVendor" ] || continue
-        vendor=$(cat "$dev/idVendor")
-        product=$(cat "$dev/idProduct")
-        manufacturer=""
-        product_name=""
-        [ -f "$dev/manufacturer" ] && manufacturer=$(cat "$dev/manufacturer")
-        [ -f "$dev/product" ] && product_name=$(cat "$dev/product")
-        echo "  USB: ${vendor}:${product} ${manufacturer} ${product_name}"
-    done
-else
-    echo "  No USB bus found"
+# List USB devices via sysfs (works without usbutils, keeps initramfs small)
+usb_found=0
+for dev in /sys/bus/usb/devices/[0-9]*; do
+    [ -f "$dev/idVendor" ] || continue
+    vendor=$(cat "$dev/idVendor")
+    product=$(cat "$dev/idProduct")
+    manufacturer=""
+    product_name=""
+    [ -f "$dev/manufacturer" ] && manufacturer=$(cat "$dev/manufacturer")
+    [ -f "$dev/product" ] && product_name=$(cat "$dev/product")
+    echo "  USB: ${vendor}:${product} ${manufacturer} ${product_name}"
+    usb_found=1
+done
+if [ "$usb_found" = "0" ]; then
+    echo "  No USB devices found"
 fi
 # List USB serial devices
 echo "=== USB Serial Devices ==="
 ls -la /dev/ttyUSB* 2>/dev/null || echo "  No /dev/ttyUSB* devices"
 ```
 
-This uses sysfs directly (no `usbutils` package needed, keeping the initramfs small).
+This uses sysfs directly (no `usbutils` package needed, keeping the initramfs small). The `usb_found` flag avoids a misleading message when the USB bus exists but no devices have enumerated yet.
 
 - [ ] **Step 2: Also add a dmesg USB summary at the end of the init script**
 
-In `build-initramfs.py`, in the `INIT_SCRIPT`, add after the existing `dmesg | grep -i -e genet -e "Link is"` line (init script line 79):
+In `build-initramfs.py`, in the `INIT_SCRIPT`, add after the existing `dmesg | grep -i -e genet -e "Link is"` line at **file line 79**:
 
 ```python
 # After the existing dmesg genet grep, add:
@@ -180,16 +179,14 @@ The `"dwc2"` pattern matches the kernel's DWC2 driver loading message (e.g., `"d
 
 - [ ] **Step 2: Add USB keywords to the output summary**
 
-In `run-rpi-boot-test.py`, add USB-related keywords to the output summary loop. Find the `for kw in [...]` list around line 237 and add:
+In `run-rpi-boot-test.py`, add USB-related keywords to the output summary loop at file line 236. Add `"dwc2"` and `"USB:"` to the existing keyword list (do NOT replace the whole list -- just insert the new keywords):
 
 ```python
-for kw in ["DHCP client bound", "Bytes transferred",
-            "Starting kernel", "Booting Linux",
-            "bcmgenet", "dwc2", "USB:",
-            "Link is Up", "lease of",
-            "64 bytes from", "HTTPS fetch",
-            "Network test complete"]:
+# Add these keywords to the existing list (between "bcmgenet" and "Link is Up"):
+"dwc2", "USB:",
 ```
+
+**Note**: Leave the `optional_checks` list (lines 210-214) unchanged -- it stays as-is.
 
 - [ ] **Step 3: Run the boot test to verify checkpoints pass**
 
@@ -276,7 +273,52 @@ FT2232 devices used on real fpgas.online RPi hosts."
 
 ---
 
-### Task 5: Update README to Document USB2 Support
+### Task 5: Test USB Network Device
+
+**Files:**
+- Modify: `run-rpi-boot-test.py:101-108` (QEMU Popen args)
+
+Test that QEMU's `usb-net` (CDC/RNDIS) device works on DWC2. This is the foundation for RPi 3/3+ network support (Phase 2), and validates that USB bulk transfers work reliably with DWC2.
+
+- [ ] **Step 1: Add a second network device via USB**
+
+This is a standalone test -- run it separately from the main boot test to avoid interfering with the GENET-based networking. Create a small test variant or add a flag. The key QEMU args to test:
+
+```bash
+# Minimal test: just verify usb-net device enumerates
+qemu-rpi-system-aarch64 -M raspi4b \
+  -kernel u-boot.bin -dtb bcm2711-rpi-4-b.dtb \
+  -nic user,tftp=test-images/tftpboot \
+  -device usb-net \
+  -serial stdio -display none -monitor none
+```
+
+When both `-nic user` (GENET) and `-device usb-net` are present, the guest will see two network interfaces: `eth0` (GENET) and a USB Ethernet device (likely `usb0` or `eth1`).
+
+- [ ] **Step 2: Verify USB network device appears in init script output**
+
+Check dmesg for `cdc_ether` or `rndis_host` driver loading, and a second network interface appearing.
+
+- [ ] **Step 3: Document the result**
+
+If `usb-net` works: note this in the commit message as confirmation that DWC2 bulk transfers support network traffic (prerequisite for Phase 2 RPi 3 network).
+
+If `usb-net` fails: this indicates DWC2 bulk transfer reliability issues that must be fixed before Phase 2. Document the specific failure in the commit message.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add run-rpi-boot-test.py
+git commit -m "Test: verify USB network device on DWC2
+
+Test usb-net (CDC/RNDIS) device enumeration on raspi4b DWC2
+controller. This validates USB bulk transfers work reliably,
+which is the prerequisite for Phase 2 RPi 3/3+ networking."
+```
+
+---
+
+### Task 6: Update README to Document USB2 Support
 
 **Files:**
 - Modify: `README.md:130-135` (Known Limitations section)
@@ -335,7 +377,7 @@ instead of 'No USB', and add USB device examples to Usage."
 
 ---
 
-### Task 6: Update PXE Boot Test with USB (Optional)
+### Task 7: Update PXE Boot Test with USB (Optional)
 
 **Files:**
 - Modify: `run-rpi-pxeboot-test.py:119-125` (QEMU Popen args)
