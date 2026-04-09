@@ -24,6 +24,27 @@ echo "=== QEMU RPi4B Network Test ==="
 echo "Waiting for network device..."
 sleep 2
 
+echo "=== USB Devices ==="
+# List USB devices via sysfs (works without usbutils, keeps initramfs small)
+usb_found=0
+for dev in /sys/bus/usb/devices/[0-9]*; do
+    [ -f "$dev/idVendor" ] || continue
+    vendor=$(cat "$dev/idVendor")
+    product=$(cat "$dev/idProduct")
+    manufacturer=""
+    product_name=""
+    [ -f "$dev/manufacturer" ] && manufacturer=$(cat "$dev/manufacturer")
+    [ -f "$dev/product" ] && product_name=$(cat "$dev/product")
+    echo "  USB: ${vendor}:${product} ${manufacturer} ${product_name}"
+    usb_found=1
+done
+if [ "$usb_found" = "0" ]; then
+    echo "  No USB devices found"
+fi
+# List USB serial devices
+echo "=== USB Serial Devices ==="
+ls -la /dev/ttyUSB* 2>/dev/null || echo "  No /dev/ttyUSB* devices"
+
 # Bring up eth0
 echo "=== Bringing up eth0 ==="
 ip link set eth0 up
@@ -77,6 +98,9 @@ wget -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || 
 # Show dmesg for GENET
 echo "=== dmesg genet ==="
 dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5
+
+echo "=== dmesg usb ==="
+dmesg 2>&1 | grep -i -e "dwc2" -e "usb 1-" -e "ttyUSB" | tail -10
 
 echo "=== Network test complete ==="
 
