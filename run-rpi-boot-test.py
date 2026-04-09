@@ -204,6 +204,8 @@ def run_test():
         ("booti starts kernel", "Starting kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
+        ("DWC2 USB",            "dwc2"),
+        ("USB device",          "USB:"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
@@ -236,7 +238,8 @@ def run_test():
         s = line.strip()
         for kw in ["DHCP client bound", "Bytes transferred",
                     "Starting kernel", "Booting Linux",
-                    "bcmgenet", "Link is Up", "lease of",
+                    "bcmgenet", "dwc2", "USB:",
+                    "Link is Up", "lease of",
                     "64 bytes from", "HTTPS fetch",
                     "Network test complete"]:
             if kw in s:
