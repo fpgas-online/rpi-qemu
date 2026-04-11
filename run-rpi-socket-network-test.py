@@ -331,8 +331,9 @@ class SocketNetPeer:
 
     def _send_dhcp_response(self, msg_type, xid, chaddr, dst_mac):
         """Send a DHCP OFFER or ACK."""
-        # DHCP message (fixed fields)
-        dhcp = bytearray(240)
+        # DHCP fixed fields: 236 bytes (op through file), then 4-byte
+        # magic cookie at offset 236, then options from offset 240.
+        dhcp = bytearray(236)
         dhcp[0] = 2              # BOOTREPLY
         dhcp[1] = 1              # Ethernet
         dhcp[2] = 6              # hw addr len
@@ -341,7 +342,7 @@ class SocketNetPeer:
         dhcp[20:24] = self.SERVER_IP   # siaddr (TFTP server)
         dhcp[28:34] = chaddr           # chaddr
 
-        # Magic cookie
+        # Magic cookie at offset 236 (start of options field)
         dhcp += bytes([99, 130, 83, 99])
 
         # DHCP options
