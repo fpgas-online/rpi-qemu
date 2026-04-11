@@ -146,7 +146,7 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 - **Pi 4B only.** Pi 3B/3B+ use USB-attached Ethernet which QEMU doesn't emulate.
 - **No GPU.** `start4.elf` is fetched but not executed. No HDMI, no hardware video decode.
 - **No USB 3.0.** The VL805 xHCI controller (USB 3.0) requires PCIe, which isn't fully emulated. USB 2.0 works via the DWC2 controller.
-- **User-mode networking only.** Uses QEMU's built-in NAT. No bridged/tap networking tested.
+- **No bridged/tap networking tested.** User-mode and socket networking work; bridged/tap not tested.
 
 ---
 
@@ -165,8 +165,10 @@ ci/
 .github/workflows/
   build-qemu-packages.yml   Build debs + pxeboot firmware, publish APT repo
   rpi-boot-test.yml          End-to-end boot test
-run-rpi-boot-test.py     Interactive boot test (U-Boot commands via serial)
-run-rpi-pxeboot-test.py  Autonomous PXE boot test
+run-rpi-boot-test.py              Interactive boot test (U-Boot via serial, -nic user)
+run-rpi-pxeboot-test.py           Autonomous PXE boot test (-nic user)
+run-rpi-socket-boot-test.py       Socket networking boot test (no peer, -nic socket)
+run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic socket)
 ```
 
 ### QEMU Patches
@@ -198,6 +200,10 @@ uv run run-rpi-boot-test.py
 
 # Run the PXE boot test
 uv run run-rpi-pxeboot-test.py
+
+# Run socket networking tests (proves -nic socket works with GENET)
+uv run run-rpi-socket-boot-test.py       # boot with socket, no peer
+uv run run-rpi-socket-network-test.py    # full DHCP/TFTP over socket
 ```
 
 ### CI Architecture
