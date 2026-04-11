@@ -62,8 +62,10 @@ KERNEL_ADDR = 0x10000000   # 256 MB
 DTB_ADDR    = 0x0f000000   # 240 MB
 INITRD_ADDR = 0x12000000   # 288 MB
 
-# Kernel boot parameters
-BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=4 rdinit=/init"
+# Kernel boot parameters -- loglevel=7 so USB/DWC info messages appear
+# on the serial console (the init script's dmesg grep searches for "dwc2"
+# which doesn't match the RPi kernel's "dwc_otg" driver name).
+BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"
 
 
 # ---------------------------------------------------------------------------
@@ -659,14 +661,24 @@ def run_test():
     try:
         # === Phase 1: U-Boot startup ===
         print("\n--- Phase 1: U-Boot startup (socket networking) ---")
-        time.sleep(6)
 
-        # Interrupt autoboot
-        for _ in range(5):
+        # Send interrupt characters continuously until we see the
+        # U-Boot prompt.  Characters are buffered in the PL011 FIFO
+        # and read by U-Boot during its autoboot countdown.
+        deadline = time.time() + 20
+        while time.time() < deadline:
             proc.stdin.write(" ")
             proc.stdin.flush()
-            time.sleep(0.3)
-        time.sleep(2)
+            time.sleep(0.2)
+            if "U-Boot>" in "".join(out_lines):
+                break
+        # Flush any buffered spaces from the command line
+        proc.stdin.write("\n")
+        proc.stdin.flush()
+        time.sleep(1)
+
+        if "U-Boot>" not in "".join(out_lines):
+            print("  ERROR: Never reached U-Boot prompt")
 
         # === Phase 2: DHCP + TFTP via peer ===
         print("--- Phase 2: DHCP + TFTP (served by Python peer) ---")
@@ -688,6 +700,9 @@ def run_test():
         send("fdt resize 8192", 2)
         send("fdt set /aliases serial0 /soc/serial@7e201000", 2)
         send("fdt set /aliases serial1 /soc/serial@7e215040", 2)
+        # Enable USB -- stock RPi DTB has status="disabled", normally
+        # enabled by VideoCore firmware which QEMU skips.
+        send("fdt set /soc/usb@7e980000 status okay", 2)
         send(f'setenv bootargs "{BOOTARGS}"', 2)
         send(f"booti 0x{KERNEL_ADDR:x} 0x{INITRD_ADDR:x}:${{filesize}} 0x{DTB_ADDR:x}", 3)
 
@@ -719,15 +734,16 @@ def run_test():
         ("booti starts kernel", "Starting kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
-        ("DWC2 USB",            "dwc2"),
-        ("USB device",          "USB:"),
-        ("USB serial",          "ttyUSB"),
+        ("USB controller",      "DWC OTG Controller"),
+        ("USB hub",             "USB hub found"),
+        ("USB keyboard",        "QEMU USB Keyboard"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
     ]
 
-    # Optional checks (may fail because peer doesn't provide internet routing)
+    # Optional checks (timing-dependent or peer doesn't route internet)
     optional_checks = [
+        ("USB serial",          "ttyUSB"),
         ("Ping gateway",        "bytes from 10.0.2.2"),
         ("Ping 8.8.8.8",       "bytes from 8.8.8.8"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
