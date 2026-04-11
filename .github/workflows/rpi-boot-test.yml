@@ -106,6 +106,16 @@ jobs:
           echo "=== Running single-instance boot test ==="
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-boot-test.py
 
+      - name: Run socket boot test (no peer)
+        run: |
+          echo "=== Running socket networking boot test (no peer) ==="
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-socket-boot-test.py
+
+      - name: Run socket network test (with DHCP/TFTP peer)
+        run: |
+          echo "=== Running socket networking test with peer ==="
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-socket-network-test.py
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
