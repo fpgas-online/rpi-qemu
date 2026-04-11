@@ -48,8 +48,10 @@ KERNEL_ADDR = 0x10000000   # 256 MB - uncompressed Image loaded here
 DTB_ADDR    = 0x0f000000   # 240 MB - device tree
 INITRD_ADDR = 0x12000000   # 288 MB - initramfs
 
-# Kernel boot parameters
-BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=4 rdinit=/init"
+# Kernel boot parameters -- loglevel=7 so USB/DWC info messages appear
+# on the serial console (the init script's dmesg grep searches for "dwc2"
+# which doesn't match the RPi kernel's "dwc_otg" driver name).
+BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"
 
 
 def check_prerequisites():
@@ -176,6 +178,10 @@ def run_test():
         # console=ttyAMA0 works.
         send("fdt set /aliases serial0 /soc/serial@7e201000", 2)
         send("fdt set /aliases serial1 /soc/serial@7e215040", 2)
+        # Enable USB -- the stock RPi DTB ships with status="disabled"
+        # because the VideoCore firmware normally enables it.  QEMU skips
+        # the firmware, so we enable it here.
+        send("fdt set /soc/usb@7e980000 status okay", 2)
         send(f'setenv bootargs "{BOOTARGS}"', 2)
         # Note: ${filesize} is set by the LAST tftpboot (initrd.gz)
         send(f"booti 0x{KERNEL_ADDR:x} 0x{INITRD_ADDR:x}:${{filesize}} 0x{DTB_ADDR:x}", 3)
@@ -207,9 +213,9 @@ def run_test():
         ("booti starts kernel", "Starting kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
-        ("DWC2 USB",            "dwc2"),
-        ("USB device",          "USB:"),
-        ("USB serial",          "ttyUSB"),
+        ("USB controller",      "DWC OTG Controller"),
+        ("USB hub",             "USB hub found"),
+        ("USB keyboard",        "QEMU USB Keyboard"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),

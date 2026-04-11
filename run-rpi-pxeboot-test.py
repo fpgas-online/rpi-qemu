@@ -101,7 +101,7 @@ def setup_tftpboot():
     if not cmdline.exists():
         cmdline.write_text(
             "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 "
-            "loglevel=4 rdinit=/init\n"
+            "loglevel=7 rdinit=/init\n"
         )
 
     return True
@@ -171,9 +171,9 @@ def run_test():
         ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
-        ("DWC2 USB",            "dwc2"),
-        ("USB device",          "USB:"),
-        ("USB serial",          "ttyUSB"),
+        ("USB controller",      "DWC OTG Controller"),
+        ("USB hub",             "USB hub found"),
+        ("USB keyboard",        "QEMU USB Keyboard"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
