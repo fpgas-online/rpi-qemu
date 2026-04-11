@@ -159,7 +159,15 @@ class SocketNetPeer:
     def _recv_exact(self, n):
         data = b''
         while len(data) < n:
-            chunk = self.conn.recv(n - len(data))
+            try:
+                chunk = self.conn.recv(n - len(data))
+            except socket.timeout:
+                # Retry without losing already-read bytes -- propagating
+                # the timeout would discard partial reads and desync the
+                # frame stream.
+                if not self.running:
+                    return None
+                continue
             if not chunk:
                 return None
             data += chunk

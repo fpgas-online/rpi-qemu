@@ -61,7 +61,13 @@ BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=4 rdinit=/
 
 
 def find_free_port():
-    """Find an available TCP port."""
+    """Find an available TCP port.
+
+    Note: small TOCTOU race -- the port can be taken between our close()
+    and QEMU's bind().  Unavoidable here because QEMU is the listener,
+    not us.  The socket-network-test avoids this by having Python bind
+    first.  In practice the window is sub-millisecond on localhost.
+    """
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
