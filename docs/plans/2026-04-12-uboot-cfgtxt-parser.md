@@ -24,6 +24,7 @@
 | `lib/rpi_cfgtxt.c` | Parser: line splitting, section filters, directive handling, env var setting |
 | `cmd/cfgtxt.c` | Command wrapper: arg parsing, memory mapping, calls into lib |
 | `test/cmd/cfgtxt.c` | C unit tests for sandbox mode |
+| `test/py/tests/test_cfgtxt.py` | Python integration tests for sandbox mode |
 
 **Modified files (inside U-Boot tree):**
 
@@ -408,8 +409,13 @@ static int do_cfgtxt_import(struct cmd_tbl *cmdtp, int flag,
 			return CMD_RET_FAILURE;
 		}
 		opts.model = model;
+	} else {
+		/* Auto-detect: read board revision from VideoCore mailbox
+		 * (BCM2835_MBOX_TAG_GET_BOARD_REV) and map to model enum.
+		 * In QEMU raspi4b, this returns the Pi 4B revision.
+		 * Falls back to PI0 if detection fails. */
+		opts.model = RPI_MODEL_PI0;  /* TODO: implement auto-detect */
 	}
-	/* else: opts.model = RPI_MODEL_PI0 (0); caller should specify */
 
 	buf = map_sysmem(addr, size);
 	if (!buf) {
@@ -536,9 +542,10 @@ Tests to implement (see spec lines 420-445 for full list):
 #include <env.h>
 #include <mapmem.h>
 #include <rpi_cfgtxt.h>
-#include <test/lib.h>
 #include <test/test.h>
 #include <test/ut.h>
+
+#define CFGTXT_TEST(_name, _flags)	UNIT_TEST(_name, _flags, cfgtxt)
 
 /* Helper: write string to mapped memory and run cfgtxt import */
 static int cfgtxt_import(struct unit_test_state *uts,
@@ -564,7 +571,7 @@ static int cfgtxt_test_basic_kv(struct unit_test_state *uts)
 	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_basic_kv, 0);
+CFGTXT_TEST(cfgtxt_test_basic_kv, 0);
 
 static int cfgtxt_test_comments(struct unit_test_state *uts)
 {
@@ -572,7 +579,7 @@ static int cfgtxt_test_comments(struct unit_test_state *uts)
 	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_comments, 0);
+CFGTXT_TEST(cfgtxt_test_comments, 0);
 
 static int cfgtxt_test_blank_lines(struct unit_test_state *uts)
 {
@@ -580,7 +587,7 @@ static int cfgtxt_test_blank_lines(struct unit_test_state *uts)
 	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_blank_lines, 0);
+CFGTXT_TEST(cfgtxt_test_blank_lines, 0);
 
 static int cfgtxt_test_last_wins(struct unit_test_state *uts)
 {
@@ -588,7 +595,7 @@ static int cfgtxt_test_last_wins(struct unit_test_state *uts)
 	ut_asserteq_str("second", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_last_wins, 0);
+CFGTXT_TEST(cfgtxt_test_last_wins, 0);
 
 static int cfgtxt_test_empty_value(struct unit_test_state *uts)
 {
@@ -596,7 +603,7 @@ static int cfgtxt_test_empty_value(struct unit_test_state *uts)
 	ut_asserteq_str("", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_empty_value, 0);
+CFGTXT_TEST(cfgtxt_test_empty_value, 0);
 
 static int cfgtxt_test_value_with_equals(struct unit_test_state *uts)
 {
@@ -604,7 +611,7 @@ static int cfgtxt_test_value_with_equals(struct unit_test_state *uts)
 	ut_asserteq_str("i2c_arm=on", env_get("rpi_cfg_dtparam_0"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_value_with_equals, 0);
+CFGTXT_TEST(cfgtxt_test_value_with_equals, 0);
 
 static int cfgtxt_test_multi_value(struct unit_test_state *uts)
 {
@@ -615,7 +622,7 @@ static int cfgtxt_test_multi_value(struct unit_test_state *uts)
 	ut_asserteq_str("2", env_get("rpi_cfg_dtoverlay_count"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_multi_value, 0);
+CFGTXT_TEST(cfgtxt_test_multi_value, 0);
 
 static int cfgtxt_test_initramfs_space(struct unit_test_state *uts)
 {
@@ -625,7 +632,7 @@ static int cfgtxt_test_initramfs_space(struct unit_test_state *uts)
 			env_get("rpi_cfg_initramfs_addr"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_initramfs_space, 0);
+CFGTXT_TEST(cfgtxt_test_initramfs_space, 0);
 
 static int cfgtxt_test_initramfs_no_addr(struct unit_test_state *uts)
 {
@@ -635,7 +642,7 @@ static int cfgtxt_test_initramfs_no_addr(struct unit_test_state *uts)
 			env_get("rpi_cfg_initramfs_addr"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_initramfs_no_addr, 0);
+CFGTXT_TEST(cfgtxt_test_initramfs_no_addr, 0);
 
 static int cfgtxt_test_section_match(struct unit_test_state *uts)
 {
@@ -643,7 +650,7 @@ static int cfgtxt_test_section_match(struct unit_test_state *uts)
 	ut_asserteq_str("matched", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_section_match, 0);
+CFGTXT_TEST(cfgtxt_test_section_match, 0);
 
 static int cfgtxt_test_section_skip(struct unit_test_state *uts)
 {
@@ -651,7 +658,7 @@ static int cfgtxt_test_section_skip(struct unit_test_state *uts)
 	ut_assertnull(env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_section_skip, 0);
+CFGTXT_TEST(cfgtxt_test_section_skip, 0);
 
 static int cfgtxt_test_section_all_reset(struct unit_test_state *uts)
 {
@@ -660,7 +667,7 @@ static int cfgtxt_test_section_all_reset(struct unit_test_state *uts)
 	ut_asserteq_str("right", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_section_all_reset, 0);
+CFGTXT_TEST(cfgtxt_test_section_all_reset, 0);
 
 static int cfgtxt_test_section_none(struct unit_test_state *uts)
 {
@@ -669,7 +676,7 @@ static int cfgtxt_test_section_none(struct unit_test_state *uts)
 	ut_asserteq_str("ok", env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_section_none, 0);
+CFGTXT_TEST(cfgtxt_test_section_none, 0);
 
 static int cfgtxt_test_section_replace(struct unit_test_state *uts)
 {
@@ -679,7 +686,7 @@ static int cfgtxt_test_section_replace(struct unit_test_state *uts)
 	ut_assertnull(env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_section_replace, 0);
+CFGTXT_TEST(cfgtxt_test_section_replace, 0);
 
 static int cfgtxt_test_crlf(struct unit_test_state *uts)
 {
@@ -688,7 +695,7 @@ static int cfgtxt_test_crlf(struct unit_test_state *uts)
 	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_crlf, 0);
+CFGTXT_TEST(cfgtxt_test_crlf, 0);
 
 static int cfgtxt_test_leading_whitespace(struct unit_test_state *uts)
 {
@@ -697,7 +704,7 @@ static int cfgtxt_test_leading_whitespace(struct unit_test_state *uts)
 	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_leading_whitespace, 0);
+CFGTXT_TEST(cfgtxt_test_leading_whitespace, 0);
 
 static int cfgtxt_test_clear(struct unit_test_state *uts)
 {
@@ -707,7 +714,7 @@ static int cfgtxt_test_clear(struct unit_test_state *uts)
 	ut_assertnull(env_get("rpi_cfg_kernel"));
 	return 0;
 }
-LIB_TEST(cfgtxt_test_clear, 0);
+CFGTXT_TEST(cfgtxt_test_clear, 0);
 
 static int cfgtxt_test_model_matching(struct unit_test_state *uts)
 {
@@ -730,7 +737,74 @@ static int cfgtxt_test_model_matching(struct unit_test_state *uts)
 
 	return 0;
 }
-LIB_TEST(cfgtxt_test_model_matching, 0);
+CFGTXT_TEST(cfgtxt_test_model_matching, 0);
+
+static int cfgtxt_test_section_and(struct unit_test_state *uts)
+{
+	/* [pi4] + [serial=0xdeadbeef] → AND: both must match */
+	struct rpi_cfgtxt_opts opts = { .model = RPI_MODEL_PI4,
+				       .serial = 0xdeadbeef };
+	/* Test via library API directly since command doesn't expose serial */
+	u8 *buf = map_sysmem(0x1000, 256);
+	const char *cfg = "[pi4]\n[serial=0xdeadbeef]\nkernel=both\n";
+
+	memcpy(buf, cfg, strlen(cfg));
+	run_command("cfgtxt clear", 0);
+	rpi_cfgtxt_parse((const char *)buf, strlen(cfg), &opts);
+	ut_asserteq_str("both", env_get("rpi_cfg_kernel"));
+	unmap_sysmem(buf);
+	return 0;
+}
+CFGTXT_TEST(cfgtxt_test_section_and, 0);
+
+static int cfgtxt_test_malformed_line(struct unit_test_state *uts)
+{
+	/* Lines without = and not a known directive are skipped */
+	cfgtxt_import(uts,
+		"this has no equals\nkernel=k8.img\nrandom junk\n", "pi4b");
+	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
+	return 0;
+}
+CFGTXT_TEST(cfgtxt_test_malformed_line, 0);
+
+static int cfgtxt_test_initramfs_no_args(struct unit_test_state *uts)
+{
+	/* "initramfs" alone (no filename) is ignored */
+	cfgtxt_import(uts, "initramfs\nkernel=k8.img\n", "pi4b");
+	ut_assertnull(env_get("rpi_cfg_initramfs"));
+	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
+	return 0;
+}
+CFGTXT_TEST(cfgtxt_test_initramfs_no_args, 0);
+
+static int cfgtxt_test_reimport_resets_counters(struct unit_test_state *uts)
+{
+	cfgtxt_import(uts,
+		"dtoverlay=first\ndtoverlay=second\n", "pi4b");
+	ut_asserteq_str("2", env_get("rpi_cfg_dtoverlay_count"));
+	/* Import again with only one overlay */
+	cfgtxt_import(uts, "dtoverlay=only\n", "pi4b");
+	ut_asserteq_str("1", env_get("rpi_cfg_dtoverlay_count"));
+	ut_asserteq_str("only", env_get("rpi_cfg_dtoverlay_0"));
+	return 0;
+}
+CFGTXT_TEST(cfgtxt_test_reimport_resets_counters, 0);
+
+static int cfgtxt_test_long_line_truncation(struct unit_test_state *uts)
+{
+	/* Line > 512 bytes should be truncated, not crash */
+	char cfg[600];
+
+	memset(cfg, 'x', sizeof(cfg));
+	memcpy(cfg, "kernel=", 7);
+	cfg[sizeof(cfg) - 2] = '\n';
+	cfg[sizeof(cfg) - 1] = '\0';
+	cfgtxt_import(uts, cfg, "pi4b");
+	/* Key is "kernel", value is truncated but set */
+	ut_assertnonnull(env_get("rpi_cfg_kernel"));
+	return 0;
+}
+CFGTXT_TEST(cfgtxt_test_long_line_truncation, 0);
 ```
 
 - [ ] **Step 2: Add test to build**
@@ -756,21 +830,87 @@ git commit -m "test: add unit tests for cfgtxt config.txt parser"
 
 ---
 
-### Task 7: Generate the U-Boot patch
+### Task 7: Write Python integration tests
+
+**Files:**
+- Create: `test-images/u-boot/test/py/tests/test_cfgtxt.py`
+
+- [ ] **Step 1: Write Python tests for sandbox mode**
+
+```python
+# SPDX-License-Identifier: GPL-2.0+
+
+import pytest
+from tests import utils
+
+
+@pytest.mark.buildconfigspec('cmd_cfgtxt')
+@pytest.mark.boardspec('sandbox')
+def test_cfgtxt_basic_import(ubman):
+    """Test basic config.txt parsing sets env vars."""
+    ram_base = utils.find_ram_base(ubman)
+    addr = '%08x' % ram_base
+    cfg = 'kernel=kernel8.img\\narm_64bit=1\\n'
+    ubman.run_command('mw.b %s 0 100' % addr)
+    for i, c in enumerate(cfg.replace('\\n', '\n')):
+        ubman.run_command('mw.b %x %x' % (ram_base + i, ord(c)))
+    size = '%x' % len(cfg.replace('\\n', '\n'))
+    ubman.run_command('cfgtxt clear')
+    ubman.run_command('cfgtxt import %s %s pi4b' % (addr, size))
+    response = ubman.run_command('printenv rpi_cfg_kernel')
+    assert 'kernel8.img' in response
+
+
+@pytest.mark.buildconfigspec('cmd_cfgtxt')
+@pytest.mark.boardspec('sandbox')
+def test_cfgtxt_clear(ubman):
+    """Test cfgtxt clear removes all rpi_cfg_ vars."""
+    response = ubman.run_command('cfgtxt clear')
+    assert 'Removed' in response
+    response = ubman.run_command('printenv rpi_cfg_kernel')
+    assert 'not defined' in response or '## Error' in response
+
+
+@pytest.mark.buildconfigspec('cmd_cfgtxt')
+@pytest.mark.boardspec('sandbox')
+def test_cfgtxt_error_zero_size(ubman):
+    """Test error on zero size."""
+    with ubman.disable_check('error_notification'):
+        response = ubman.run_command('cfgtxt import 1000 0 pi4b')
+    assert 'Error' in response
+```
+
+- [ ] **Step 2: Commit**
+
+```bash
+cd test-images/u-boot
+git add test/py/tests/test_cfgtxt.py
+git commit -m "test: add Python integration tests for cfgtxt command"
+```
+
+---
+
+### Task 8: Generate the U-Boot patch
 
 **Files:**
 - Create: `ci/uboot-patches/0001-cmd-add-Raspberry-Pi-config.txt-parser.patch`
 
 - [ ] **Step 1: Generate patch from U-Boot commits**
 
+The U-Boot base commit is `47e064f13171f15817aa1b22b04e309964b15c2c` (used by the build workflow).
+
 ```bash
 cd test-images/u-boot
-# Find the base commit (before our changes)
-BASE=$(git log --oneline | grep -v "rpi:" | grep -v "test:" | head -1 | cut -d' ' -f1)
-git format-patch ${BASE}..HEAD --stdout > ../../ci/uboot-patches/0001-cmd-add-Raspberry-Pi-config.txt-parser.patch
+mkdir -p ../../ci/uboot-patches
+git format-patch 47e064f1..HEAD --stdout > ../../ci/uboot-patches/0001-cmd-add-Raspberry-Pi-config.txt-parser.patch
 ```
 
-If the commits were made incrementally, squash them into one patch first, or use `git format-patch` with the appropriate range.
+If the commits were made incrementally, squash into one patch first:
+```bash
+git reset --soft 47e064f1
+git commit -m "cmd: add Raspberry Pi config.txt parser (cfgtxt)"
+git format-patch 47e064f1..HEAD --stdout > ../../ci/uboot-patches/0001-cmd-add-Raspberry-Pi-config.txt-parser.patch
+```
 
 - [ ] **Step 2: Verify patch applies cleanly**
 
@@ -792,7 +932,7 @@ git commit -m "Add U-Boot patch: Raspberry Pi config.txt parser command"
 
 ---
 
-### Task 8: Update build infrastructure
+### Task 9: Update build infrastructure
 
 **Files:**
 - Modify: `.github/workflows/build-qemu-packages.yml`
@@ -808,15 +948,16 @@ CONFIG_CMD_CFGTXT=y
 
 - [ ] **Step 2: Update build workflow to apply U-Boot patches**
 
-In `.github/workflows/build-qemu-packages.yml`, in the `build-pxeboot` job, after the `git checkout` and `cp` lines for defconfig/env, add patch application:
+In `.github/workflows/build-qemu-packages.yml`, in the **`build-pxeboot` job** (line ~174), after the `cp` lines for defconfig and env file but BEFORE `make rpi_4_qemu_pxeboot_defconfig`, add:
 
 ```yaml
-          # Apply U-Boot patches
-          if [ -d ../../ci/uboot-patches ]; then
-            for p in ../../ci/uboot-patches/*.patch; do
-              git am "$p"
-            done
-          fi
+          # Apply U-Boot patches (cfgtxt parser, etc.)
+          for p in ../../ci/uboot-patches/*.patch; do
+            [ -f "$p" ] && git am "$p"
+          done
+```
+
+Note: This goes into the `build-pxeboot` job only, NOT the QEMU build jobs. The existing QEMU patches in `ci/qemu-patches/` use `git apply` and are applied in a separate job.
 ```
 
 This goes between the `cp` commands and the `make` command.
@@ -830,7 +971,7 @@ git commit -m "Build: apply U-Boot patches and enable CONFIG_CMD_CFGTXT"
 
 ---
 
-### Task 9: Update vc-boot-pi4b.env to use cfgtxt
+### Task 10: Update vc-boot-pi4b.env to use cfgtxt
 
 **Files:**
 - Modify: `ci/vc-boot-pi4b.env`
@@ -890,7 +1031,7 @@ parity. Env vars now use rpi_cfg_ prefix (rpi_cfg_kernel, etc.)."
 
 ---
 
-### Task 10: Update test script
+### Task 11: Update test script
 
 **Files:**
 - Modify: `run-rpi-pxeboot-test.py`
@@ -930,7 +1071,7 @@ git commit -m "Test: verify cfgtxt config.txt parsing in pxeboot test"
 
 ---
 
-### Task 11: End-to-end verification
+### Task 12: End-to-end verification
 
 - [ ] **Step 1: Rebuild U-Boot with the patch**
 
