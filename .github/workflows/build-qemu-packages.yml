@@ -396,7 +396,10 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
+          # Tag must match vN.N pattern (repo ruleset). Overwrite existing
+          # release on each build — package versions auto-increment via
+          # git describe independently of the release tag.
+          tag_name: v0.2
           name: "QEMU RPi ${{ steps.version.outputs.version }}"
           body: |
             QEMU with Raspberry Pi 4B GENET Ethernet support.

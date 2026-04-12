@@ -146,6 +146,11 @@ def main():
         print(f"{EPOCH}:{version}")
         return
 
+    if "--tag-version" in sys.argv:
+        # Git-tag-safe version (no + or : which are invalid in refs)
+        print(version.replace("+", "."))
+        return
+
     date_str = git_author_date()
     messages = git_log_oneline()
 
