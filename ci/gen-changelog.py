@@ -65,8 +65,17 @@ def setup_git_safe_directory():
 
 
 def git_describe():
-    """Get git describe output."""
-    result = _run_git("describe", "--tags", "--long", "--always")
+    """Get git describe output.
+
+    Uses --match to only consider simple version tags (v0.1, v1.0)
+    and --exclude to skip auto-generated release tags (v0.1.67.gabcdef)
+    which would otherwise cause version strings to grow on every build.
+    """
+    result = _run_git(
+        "describe", "--tags", "--long", "--always",
+        "--match", "v[0-9]*",
+        "--exclude", "v*.*.*",
+    )
     if result:
         return result
 
