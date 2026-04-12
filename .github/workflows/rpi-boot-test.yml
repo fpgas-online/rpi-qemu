@@ -116,6 +116,24 @@ jobs:
           echo "=== Running socket networking test with peer ==="
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-socket-network-test.py
 
+      - name: Download PXE boot firmware
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-pxeboot
+          path: tmp/pxeboot-firmware/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run PXE boot test (cfgtxt + gzip decompression)
+        if: github.event_name == 'workflow_run'
+        run: |
+          echo "=== Running PXE boot test (VideoCore emulation) ==="
+          ls -lh tmp/pxeboot-firmware/
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) \
+          PXEBOOT_OVERRIDE=tmp/pxeboot-firmware/rpi4b-pxeboot.bin \
+            python3 run-rpi-pxeboot-test.py
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
