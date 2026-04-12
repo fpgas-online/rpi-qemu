@@ -1,7 +1,7 @@
 From 615feee72141d68236f86b6b2686b5f874ec3cd0 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:38:09 +0930
-Subject: [PATCH 1/8] rpi: add config.txt parser API header
+Subject: [PATCH 1/9] rpi: add config.txt parser API header
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -109,7 +109,7 @@ index 00000000..8c103de1
 From d9c9247c41b6889c47132890ae35f1d048d33a41 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:38:33 +0930
-Subject: [PATCH 2/8] rpi: add config.txt model mapping tables
+Subject: [PATCH 2/9] rpi: add config.txt model mapping tables
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -229,7 +229,7 @@ index 00000000..8ff6eda5
 From 54e066f0a7740c734c2d5329243af9783770e6a5 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:39:12 +0930
-Subject: [PATCH 3/8] rpi: add config.txt line parser and filter state machine
+Subject: [PATCH 3/9] rpi: add config.txt line parser and filter state machine
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -473,7 +473,7 @@ index 8ff6eda5..b60b9d26 100644
 From 86335d5df90fba71e4a818451250fb33bd5c458e Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:40:27 +0930
-Subject: [PATCH 4/8] rpi: add config.txt directive handlers and parse loop
+Subject: [PATCH 4/9] rpi: add config.txt directive handlers and parse loop
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -699,7 +699,7 @@ index b60b9d26..552fe71d 100644
 From cfc430fad7c23f75dd92af927e682deb336720d2 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:42:11 +0930
-Subject: [PATCH 5/8] rpi: add cfgtxt command wrapper and build integration
+Subject: [PATCH 5/9] rpi: add cfgtxt command wrapper and build integration
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -891,7 +891,7 @@ index 552fe71d..a821d17f 100644
 From 0c34e297b82c02743a1d886f1b86dd911cb791c9 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:50:09 +0930
-Subject: [PATCH 6/8] rpi: fix review issues in config.txt parser
+Subject: [PATCH 6/9] rpi: fix review issues in config.txt parser
 
 - Clear none_active on any section header, not just [all]
 - Fix dangling pointer in rpi_cfgtxt_clear() by copying key strings
@@ -1029,7 +1029,7 @@ index a821d17f..6a4cdfbb 100644
 From e340d6e57ce222c9714737475ee27c972b1ab8bf Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:53:35 +0930
-Subject: [PATCH 7/8] test: add unit tests for cfgtxt config.txt parser
+Subject: [PATCH 7/9] test: add unit tests for cfgtxt config.txt parser
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 ---
@@ -1365,7 +1365,7 @@ index 00000000..1c1e09ff
 From 17f8198ee3b79db2d23d7245e5f6e7913b602c27 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Sun, 12 Apr 2026 15:54:29 +0930
-Subject: [PATCH 8/8] test: add Python integration tests for cfgtxt command
+Subject: [PATCH 8/9] test: add Python integration tests for cfgtxt command
 
 ---
  test/py/tests/test_cfgtxt.py | 40 ++++++++++++++++++++++++++++++++++++
@@ -1418,6 +1418,61 @@ index 00000000..12e1c323
 +    with ubman.disable_check('error_notification'):
 +        response = ubman.run_command('cfgtxt import 1000 0 pi4b')
 +    assert 'Error' in response
+-- 
+2.47.3
+
+
+From db1cad5b94da9e0527f9bd9a0cca0fa0a7a2dc07 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 16:25:35 +0930
+Subject: [PATCH 9/9] rpi: fix buffer size mismatch between write and clear
+ paths
+
+handle_directive() and set_env_indexed() used 520-byte name buffers,
+but rpi_cfgtxt_clear() used 64-byte buffers to collect keys for
+deletion. Long key names would be stored in env but couldn't be
+cleared. Fix by using consistent 64-byte buffers everywhere and
+rejecting keys too long for the buffer in handle_directive().
+
+No real RPi config.txt key exceeds 55 characters (the effective
+limit after the rpi_cfg_ prefix), so this only affects malformed input.
+---
+ lib/rpi_cfgtxt.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+index 6a4cdfbb..79eca390 100644
+--- a/lib/rpi_cfgtxt.c
++++ b/lib/rpi_cfgtxt.c
+@@ -338,7 +338,7 @@ static const char *copy_line(const char *pos, const char *end,
+ static void set_env_indexed(const char *prefix, int *counter,
+ 			    const char *value)
+ {
+-	char name[RPI_CFGTXT_MAX_LINE_LEN + sizeof(RPI_CFGTXT_ENV_PREFIX)];
++	char name[64];
+ 
+ 	snprintf(name, sizeof(name), "%s_%d", prefix, *counter);
+ 	env_set(name, value);
+@@ -357,7 +357,7 @@ static void set_env_indexed(const char *prefix, int *counter,
+ static void handle_directive(char *line, struct cfgtxt_state *state)
+ {
+ 	char *eq;
+-	char name[RPI_CFGTXT_MAX_LINE_LEN + sizeof(RPI_CFGTXT_ENV_PREFIX)];
++	char name[64];
+ 
+ 	/* Space-separated: initramfs <file> [<addr>] */
+ 	if (!strncmp(line, "initramfs ", 10)) {
+@@ -421,6 +421,10 @@ static void handle_directive(char *line, struct cfgtxt_state *state)
+ 
+ 	*eq = '\0';
+ 
++	/* Reject keys too long for our name buffer (prefix + key < 64) */
++	if (strlen(line) > sizeof(name) - strlen(RPI_CFGTXT_ENV_PREFIX) - 1)
++		return;
++
+ 	/* Multi-value keys */
+ 	if (!strcmp(line, "dtoverlay")) {
+ 		set_env_indexed(RPI_CFGTXT_ENV_PREFIX "dtoverlay",
 -- 
 2.47.3
 
