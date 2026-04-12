@@ -31,11 +31,15 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Get package version
+      - name: Generate changelog and get version
         id: version
         run: |
-          apt-get install -y dpkg-dev
+          apt-get install -y dpkg-dev python3
+          python3 ci/gen-changelog.py > ci/debian/changelog
+          cat ci/debian/changelog
           version=$(dpkg-parsechangelog -l ci/debian/changelog -S Version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Package version: $version"
@@ -208,6 +212,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download deb artifacts
         uses: actions/download-artifact@v4
@@ -223,24 +229,29 @@ jobs:
 
       - name: Build pxeboot deb
         run: |
+          apt-get update && apt-get install -y python3
+          VERSION=$(python3 ci/gen-changelog.py --version-only)
+          echo "Pxeboot package version: $VERSION"
+
           PKG=tmp/pxeboot-pkg
           mkdir -p $PKG/usr/share/qemu-rpi-pxeboot
           cp tmp/pxeboot-firmware/rpi4b-pxeboot.bin $PKG/usr/share/qemu-rpi-pxeboot/
           cp tmp/pxeboot-firmware/rpi4b-pxeboot.dtb $PKG/usr/share/qemu-rpi-pxeboot/
 
           mkdir -p $PKG/DEBIAN
-          cat > $PKG/DEBIAN/control <<'CTRL'
+          cat > $PKG/DEBIAN/control <<CTRL
           Package: qemu-rpi-pxeboot
-          Version: 0.1
+          Version: ${VERSION}
           Architecture: all
           Maintainer: Tim Ansell <mithro@mithis.com>
           Recommends: qemu-rpi-system-arm
           Description: PXE network boot emulation for QEMU Raspberry Pi 4B
            Enables QEMU raspi4b to PXE boot from a standard RPi TFTP layout.
+           Includes cfgtxt config.txt parser with full VideoCore parity.
           CTRL
           sed -i 's/^          //' $PKG/DEBIAN/control
 
-          dpkg-deb --build $PKG tmp/debs/qemu-rpi-pxeboot_0.1_all.deb
+          dpkg-deb --build $PKG "tmp/debs/qemu-rpi-pxeboot_${VERSION}_all.deb"
 
       - name: List all artifacts
         run: ls -lh tmp/debs/
@@ -364,6 +375,18 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: |
+          version=$(python3 ci/gen-changelog.py --version-only)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -372,18 +395,19 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1
-          name: "QEMU RPi v11.0.0-rc2+rpi1"
+          tag_name: v${{ steps.version.outputs.version }}
+          name: "QEMU RPi ${{ steps.version.outputs.version }}"
           body: |
             QEMU with Raspberry Pi 4B GENET Ethernet support.
 
             Based on QEMU v11.0.0-rc2 + 16 patches (Kambalin v6 GENET port).
+            PXE boot firmware with cfgtxt config.txt parser (full VideoCore parity).
 
             **Install via APT:**
             ```
             echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
               sudo tee /etc/apt/sources.list.d/qemu-rpi.list
-            sudo apt-get update && sudo apt-get install qemu-rpi-system-arm
+            sudo apt-get update && sudo apt-get install qemu-rpi-system-arm qemu-rpi-pxeboot
             ```
 
             **Or download the static binary** (no dependencies needed).
