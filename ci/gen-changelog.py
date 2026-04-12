@@ -27,12 +27,45 @@ DISTRO = "trixie"
 
 
 def git_describe():
-    """Get git describe output."""
+    """Get git describe output.
+
+    Handles CI environments where the repo may be in an untrusted
+    directory or tags may not have been fetched.
+    """
+    # Ensure git trusts this directory (needed in CI containers)
+    cwd = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if cwd.returncode == 0:
+        toplevel = cwd.stdout.strip()
+        subprocess.run(
+            ["git", "config", "--global", "--add", "safe.directory", toplevel],
+            capture_output=True,
+        )
+
+    # Try git describe with tags
     result = subprocess.run(
         ["git", "describe", "--tags", "--long", "--always"],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True,
     )
-    return result.stdout.strip()
+    if result.returncode == 0:
+        return result.stdout.strip()
+
+    # Fallback: use rev-list count + short sha
+    count = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        capture_output=True, text=True,
+    )
+    sha = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if count.returncode == 0 and sha.returncode == 0:
+        return f"v0.0-{count.stdout.strip()}-g{sha.stdout.strip()}"
+
+    # Last resort
+    return "0.0+0.unknown"
 
 
 def describe_to_version(describe):
