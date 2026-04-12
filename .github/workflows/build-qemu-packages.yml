@@ -385,8 +385,10 @@ jobs:
         id: version
         run: |
           version=$(python3 ci/gen-changelog.py --version-only)
+          tag_version=$(python3 ci/gen-changelog.py --tag-version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Release version: $version"
+          echo "tag=v${tag_version}" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version (tag: v${tag_version})"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -396,10 +398,7 @@ jobs:
       - name: Create or update release
         uses: softprops/action-gh-release@v2
         with:
-          # Tag must match vN.N pattern (repo ruleset). Overwrite existing
-          # release on each build — package versions auto-increment via
-          # git describe independently of the release tag.
-          tag_name: v0.2
+          tag_name: ${{ steps.version.outputs.tag }}
           name: "QEMU RPi ${{ steps.version.outputs.version }}"
           body: |
             QEMU with Raspberry Pi 4B GENET Ethernet support.
