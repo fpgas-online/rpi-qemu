@@ -1,0 +1,1423 @@
+From 615feee72141d68236f86b6b2686b5f874ec3cd0 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:38:09 +0930
+Subject: [PATCH 1/8] rpi: add config.txt parser API header
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ include/rpi_cfgtxt.h | 87 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 87 insertions(+)
+ create mode 100644 include/rpi_cfgtxt.h
+
+diff --git a/include/rpi_cfgtxt.h b/include/rpi_cfgtxt.h
+new file mode 100644
+index 00000000..8c103de1
+--- /dev/null
++++ b/include/rpi_cfgtxt.h
+@@ -0,0 +1,87 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Raspberry Pi config.txt parser
++ *
++ * Parses VideoCore GPU bootloader config.txt format including
++ * conditional sections, key=value pairs, multi-value keys,
++ * and space-separated directives.
++ */
++
++#ifndef __RPI_CFGTXT_H
++#define __RPI_CFGTXT_H
++
++#include <linux/types.h>
++
++/* Board model identifiers for conditional section evaluation */
++enum rpi_board_model {
++	RPI_MODEL_PI0,
++	RPI_MODEL_PI02,
++	RPI_MODEL_PI1,
++	RPI_MODEL_CM1,
++	RPI_MODEL_PI2,
++	RPI_MODEL_PI3,
++	RPI_MODEL_CM3,
++	RPI_MODEL_PI4,
++	RPI_MODEL_PI400,
++	RPI_MODEL_CM4,
++	RPI_MODEL_PI5,
++	RPI_MODEL_PI500,
++	RPI_MODEL_CM5,
++	RPI_MODEL_COUNT,
++};
++
++/* Include callback: called when parser encounters "include <file>".
++ * Callback should load the file and call rpi_cfgtxt_parse() recursively.
++ * Returns 0 on success, -errno on failure. */
++typedef int (*cfgtxt_include_fn)(const char *filename, void *ctx);
++
++#define RPI_CFGTXT_MAX_INCLUDE_DEPTH	8
++#define RPI_CFGTXT_MAX_LINE_LEN		512
++#define RPI_CFGTXT_ENV_PREFIX		"rpi_cfg_"
++
++/* Parser options */
++struct rpi_cfgtxt_opts {
++	enum rpi_board_model model;
++	u64 serial;
++	int boot_partition;
++	bool tryboot;
++	int include_depth;
++	cfgtxt_include_fn include_cb;
++	void *include_ctx;
++};
++
++/**
++ * rpi_cfgtxt_parse() - Parse config.txt and set rpi_cfg_* env vars
++ *
++ * @buf:  Read-only buffer containing config.txt content
++ * @size: Size of buffer in bytes
++ * @opts: Parser options (model, serial, callbacks, etc.)
++ * Return: 0 on success, -errno on failure
++ */
++int rpi_cfgtxt_parse(const char *buf, size_t size,
++		     const struct rpi_cfgtxt_opts *opts);
++
++/**
++ * rpi_cfgtxt_clear() - Remove all rpi_cfg_* environment variables
++ *
++ * Return: number of variables removed
++ */
++int rpi_cfgtxt_clear(void);
++
++/**
++ * rpi_cfgtxt_model_from_str() - Convert model name string to enum
++ *
++ * Accepts "pi4b", "pi4", "cm4", "pi400", etc.
++ * Return: enum value, or -1 if unknown
++ */
++int rpi_cfgtxt_model_from_str(const char *name);
++
++/**
++ * rpi_cfgtxt_model_filters() - Get section filters for a model
++ *
++ * Return: static, null-terminated array of filter name strings
++ *         (e.g., {"pi4", NULL} for RPI_MODEL_PI4)
++ */
++const char * const *rpi_cfgtxt_model_filters(enum rpi_board_model model);
++
++#endif /* __RPI_CFGTXT_H */
+-- 
+2.47.3
+
+
+From d9c9247c41b6889c47132890ae35f1d048d33a41 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:38:33 +0930
+Subject: [PATCH 2/8] rpi: add config.txt model mapping tables
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ lib/rpi_cfgtxt.c | 99 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+ create mode 100644 lib/rpi_cfgtxt.c
+
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+new file mode 100644
+index 00000000..8ff6eda5
+--- /dev/null
++++ b/lib/rpi_cfgtxt.c
+@@ -0,0 +1,99 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Raspberry Pi config.txt parser
++ *
++ * Parses VideoCore GPU bootloader config.txt format including
++ * conditional sections, key=value pairs, multi-value keys,
++ * and space-separated directives.
++ */
++
++#include <env.h>
++#include <rpi_cfgtxt.h>
++#include <string.h>
++
++/* --- Model name-to-enum mapping --- */
++
++struct model_name_entry {
++	const char *name;
++	enum rpi_board_model model;
++};
++
++static const struct model_name_entry model_names[] = {
++	{ "pi0",   RPI_MODEL_PI0 },
++	{ "pi0w",  RPI_MODEL_PI0 },
++	{ "pi02",  RPI_MODEL_PI02 },
++	{ "pi02w", RPI_MODEL_PI02 },
++	{ "pi1",   RPI_MODEL_PI1 },
++	{ "pi1a",  RPI_MODEL_PI1 },
++	{ "pi1b",  RPI_MODEL_PI1 },
++	{ "cm1",   RPI_MODEL_CM1 },
++	{ "pi2",   RPI_MODEL_PI2 },
++	{ "pi2b",  RPI_MODEL_PI2 },
++	{ "pi3",   RPI_MODEL_PI3 },
++	{ "pi3b",  RPI_MODEL_PI3 },
++	{ "pi3b+", RPI_MODEL_PI3 },
++	{ "pi3a+", RPI_MODEL_PI3 },
++	{ "cm3",   RPI_MODEL_CM3 },
++	{ "cm3+",  RPI_MODEL_CM3 },
++	{ "pi4",   RPI_MODEL_PI4 },
++	{ "pi4b",  RPI_MODEL_PI4 },
++	{ "pi400", RPI_MODEL_PI400 },
++	{ "cm4",   RPI_MODEL_CM4 },
++	{ "cm4s",  RPI_MODEL_CM4 },
++	{ "pi5",   RPI_MODEL_PI5 },
++	{ "pi500", RPI_MODEL_PI500 },
++	{ "cm5",   RPI_MODEL_CM5 },
++};
++
++int rpi_cfgtxt_model_from_str(const char *name)
++{
++	int i;
++
++	if (!name)
++		return -1;
++
++	for (i = 0; i < ARRAY_SIZE(model_names); i++) {
++		if (!strcmp(name, model_names[i].name))
++			return model_names[i].model;
++	}
++	return -1;
++}
++
++/* --- Model-to-section-filter mapping --- */
++
++static const char *filters_pi0[]   = { "pi0", NULL };
++static const char *filters_pi02[]  = { "pi0", "pi02", NULL };
++static const char *filters_pi1[]   = { "pi1", NULL };
++static const char *filters_cm1[]   = { "pi1", "cm1", NULL };
++static const char *filters_pi2[]   = { "pi2", NULL };
++static const char *filters_pi3[]   = { "pi3", NULL };
++static const char *filters_cm3[]   = { "pi3", "cm3", NULL };
++static const char *filters_pi4[]   = { "pi4", NULL };
++static const char *filters_pi400[] = { "pi4", "pi400", NULL };
++static const char *filters_cm4[]   = { "pi4", "cm4", NULL };
++static const char *filters_pi5[]   = { "pi5", NULL };
++static const char *filters_pi500[] = { "pi5", "pi500", NULL };
++static const char *filters_cm5[]   = { "pi5", "cm5", NULL };
++
++static const char * const *model_filters[RPI_MODEL_COUNT] = {
++	[RPI_MODEL_PI0]   = (const char * const *)filters_pi0,
++	[RPI_MODEL_PI02]  = (const char * const *)filters_pi02,
++	[RPI_MODEL_PI1]   = (const char * const *)filters_pi1,
++	[RPI_MODEL_CM1]   = (const char * const *)filters_cm1,
++	[RPI_MODEL_PI2]   = (const char * const *)filters_pi2,
++	[RPI_MODEL_PI3]   = (const char * const *)filters_pi3,
++	[RPI_MODEL_CM3]   = (const char * const *)filters_cm3,
++	[RPI_MODEL_PI4]   = (const char * const *)filters_pi4,
++	[RPI_MODEL_PI400] = (const char * const *)filters_pi400,
++	[RPI_MODEL_CM4]   = (const char * const *)filters_cm4,
++	[RPI_MODEL_PI5]   = (const char * const *)filters_pi5,
++	[RPI_MODEL_PI500] = (const char * const *)filters_pi500,
++	[RPI_MODEL_CM5]   = (const char * const *)filters_cm5,
++};
++
++const char * const *rpi_cfgtxt_model_filters(enum rpi_board_model model)
++{
++	if (model >= RPI_MODEL_COUNT)
++		return NULL;
++	return model_filters[model];
++}
+-- 
+2.47.3
+
+
+From 54e066f0a7740c734c2d5329243af9783770e6a5 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:39:12 +0930
+Subject: [PATCH 3/8] rpi: add config.txt line parser and filter state machine
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ lib/rpi_cfgtxt.c | 222 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 222 insertions(+)
+
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+index 8ff6eda5..b60b9d26 100644
+--- a/lib/rpi_cfgtxt.c
++++ b/lib/rpi_cfgtxt.c
+@@ -97,3 +97,225 @@ const char * const *rpi_cfgtxt_model_filters(enum rpi_board_model model)
+ 		return NULL;
+ 	return model_filters[model];
+ }
++
++/* --- Filter state machine --- */
++
++enum filter_state {
++	FILTER_UNSET,
++	FILTER_MATCH,
++	FILTER_NOMATCH,
++};
++
++struct cfgtxt_state {
++	enum filter_state model_filter;
++	enum filter_state serial_filter;
++	enum filter_state partition_filter;
++	enum filter_state tryboot_filter;
++	enum filter_state edid_filter;
++	enum filter_state gpio_filter;
++	bool none_active;
++
++	int dtoverlay_count;
++	int dtparam_count;
++	int gpio_count;
++
++	char line_buf[RPI_CFGTXT_MAX_LINE_LEN];
++	const struct rpi_cfgtxt_opts *opts;
++};
++
++/*
++ * line_accepted() - Check if current line passes all active filters
++ *
++ * A line is accepted when none_active is false and no filter is in
++ * FILTER_NOMATCH state.  FILTER_UNSET counts as passing.
++ */
++static bool line_accepted(const struct cfgtxt_state *state)
++{
++	if (state->none_active)
++		return false;
++	if (state->model_filter == FILTER_NOMATCH)
++		return false;
++	if (state->serial_filter == FILTER_NOMATCH)
++		return false;
++	if (state->partition_filter == FILTER_NOMATCH)
++		return false;
++	if (state->tryboot_filter == FILTER_NOMATCH)
++		return false;
++	if (state->edid_filter == FILTER_NOMATCH)
++		return false;
++	if (state->gpio_filter == FILTER_NOMATCH)
++		return false;
++	return true;
++}
++
++/*
++ * model_matches_section() - Check if a model matches a section filter name
++ *
++ * Looks up the model's filter list and checks if the given section
++ * name appears in it.
++ */
++static bool model_matches_section(enum rpi_board_model model,
++				  const char *section)
++{
++	const char * const *filters;
++	int i;
++
++	filters = rpi_cfgtxt_model_filters(model);
++	if (!filters)
++		return false;
++
++	for (i = 0; filters[i]; i++) {
++		if (!strcmp(filters[i], section))
++			return true;
++	}
++	return false;
++}
++
++/*
++ * eval_section_header() - Parse and evaluate a section header line
++ *
++ * Updates the appropriate filter in cfgtxt_state.
++ * Handles: [all], [none], [piN], [cmN], [serial=0x...],
++ *          [partition=N], [tryboot], [EDID=...], [gpio<N>=<0|1>]
++ */
++static void eval_section_header(const char *line, struct cfgtxt_state *state)
++{
++	const char *p = line + 1;	/* skip '[' */
++	char section[64];
++	char *end;
++	int len;
++
++	/* Find closing bracket */
++	end = strchr(p, ']');
++	if (!end)
++		return;
++
++	len = end - p;
++	if (len <= 0 || len >= sizeof(section))
++		return;
++
++	memcpy(section, p, len);
++	section[len] = '\0';
++
++	/* [all] - reset all filters */
++	if (!strcmp(section, "all")) {
++		state->model_filter = FILTER_UNSET;
++		state->serial_filter = FILTER_UNSET;
++		state->partition_filter = FILTER_UNSET;
++		state->tryboot_filter = FILTER_UNSET;
++		state->edid_filter = FILTER_UNSET;
++		state->gpio_filter = FILTER_UNSET;
++		state->none_active = false;
++		return;
++	}
++
++	/* [none] - block everything */
++	if (!strcmp(section, "none")) {
++		state->none_active = true;
++		return;
++	}
++
++	/* [tryboot] */
++	if (!strcmp(section, "tryboot")) {
++		state->tryboot_filter = state->opts->tryboot ?
++			FILTER_MATCH : FILTER_NOMATCH;
++		return;
++	}
++
++	/* [serial=0x...] */
++	if (!strncmp(section, "serial=", 7)) {
++		unsigned long long serial;
++
++		serial = simple_strtoull(section + 7, NULL, 16);
++		state->serial_filter = (serial == state->opts->serial) ?
++			FILTER_MATCH : FILTER_NOMATCH;
++		return;
++	}
++
++	/* [partition=N] */
++	if (!strncmp(section, "partition=", 10)) {
++		int part;
++
++		part = simple_strtoul(section + 10, NULL, 10);
++		state->partition_filter = (part == state->opts->boot_partition) ?
++			FILTER_MATCH : FILTER_NOMATCH;
++		return;
++	}
++
++	/* [EDID=...] - always NOMATCH (CONFIG_VIDEO disabled) */
++	if (!strncmp(section, "EDID=", 5)) {
++		state->edid_filter = FILTER_NOMATCH;
++		return;
++	}
++
++	/* [gpio<N>=<0|1>] */
++	if (!strncmp(section, "gpio", 4) && section[4] >= '0' &&
++	    section[4] <= '9') {
++		/*
++		 * GPIO filter: parse pin number and expected value.
++		 * Without DM GPIO available, always NOMATCH.
++		 */
++		state->gpio_filter = FILTER_NOMATCH;
++		return;
++	}
++
++	/* Model filter: [pi4], [cm3], [pi400], etc. */
++	if (model_matches_section(state->opts->model, section))
++		state->model_filter = FILTER_MATCH;
++	else
++		state->model_filter = FILTER_NOMATCH;
++}
++
++/*
++ * copy_line() - Copy one line from the input buffer into state->line_buf
++ *
++ * Handles LF and CRLF line endings.  Strips leading and trailing
++ * whitespace.  Truncates at RPI_CFGTXT_MAX_LINE_LEN - 1.
++ * Returns pointer to next line in the input buffer.
++ */
++static const char *copy_line(const char *pos, const char *end,
++			     struct cfgtxt_state *state)
++{
++	const char *eol;
++	const char *src;
++	int len, i;
++
++	/* Find end of line */
++	for (eol = pos; eol < end && *eol != '\n'; eol++)
++		;
++
++	/* Calculate raw line length (excluding newline) */
++	len = eol - pos;
++
++	/* Strip trailing \r for CRLF */
++	if (len > 0 && pos[len - 1] == '\r')
++		len--;
++
++	/* Skip leading whitespace */
++	src = pos;
++	while (src < pos + len && (*src == ' ' || *src == '\t'))
++		src++;
++	len -= (src - pos);
++
++	/* Truncate if needed */
++	if (len >= RPI_CFGTXT_MAX_LINE_LEN)
++		len = RPI_CFGTXT_MAX_LINE_LEN - 1;
++
++	/* Copy into line buffer */
++	if (len > 0)
++		memcpy(state->line_buf, src, len);
++	state->line_buf[len] = '\0';
++
++	/* Strip trailing whitespace */
++	for (i = len - 1; i >= 0; i--) {
++		if (state->line_buf[i] == ' ' || state->line_buf[i] == '\t')
++			state->line_buf[i] = '\0';
++		else
++			break;
++	}
++
++	/* Advance past newline */
++	if (eol < end)
++		return eol + 1;
++	return eol;
++}
+-- 
+2.47.3
+
+
+From 86335d5df90fba71e4a818451250fb33bd5c458e Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:40:27 +0930
+Subject: [PATCH 4/8] rpi: add config.txt directive handlers and parse loop
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ lib/rpi_cfgtxt.c | 195 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 195 insertions(+)
+
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+index b60b9d26..552fe71d 100644
+--- a/lib/rpi_cfgtxt.c
++++ b/lib/rpi_cfgtxt.c
+@@ -8,8 +8,12 @@
+  */
+ 
+ #include <env.h>
++#include <env_internal.h>
++#include <linux/errno.h>
+ #include <rpi_cfgtxt.h>
++#include <search.h>
+ #include <string.h>
++#include <vsprintf.h>
+ 
+ /* --- Model name-to-enum mapping --- */
+ 
+@@ -319,3 +323,194 @@ static const char *copy_line(const char *pos, const char *end,
+ 		return eol + 1;
+ 	return eol;
+ }
++
++/* --- Directive handlers --- */
++
++/*
++ * set_env_indexed() - Set a multi-value environment variable
++ *
++ * For keys like dtoverlay that can appear multiple times.
++ * Sets rpi_cfg_<key>_<N>=<value> and rpi_cfg_<key>_count=<N+1>.
++ */
++static void set_env_indexed(const char *prefix, int *counter,
++			    const char *value)
++{
++	char name[64];
++
++	snprintf(name, sizeof(name), "%s_%d", prefix, *counter);
++	env_set(name, value);
++	(*counter)++;
++	snprintf(name, sizeof(name), "%s_count", prefix);
++	env_set_ulong(name, *counter);
++}
++
++/*
++ * handle_directive() - Process a single accepted config.txt line
++ *
++ * Handles space-separated directives (initramfs, include),
++ * multi-value keys (dtoverlay, dtparam, gpio), and simple
++ * key=value pairs (last-wins).
++ */
++static void handle_directive(char *line, struct cfgtxt_state *state)
++{
++	char *eq;
++	char name[64];
++
++	/* Space-separated: initramfs <file> [<addr>] */
++	if (!strncmp(line, "initramfs ", 10)) {
++		char *file = line + 10;
++		char *addr;
++
++		/* Skip whitespace after "initramfs " */
++		while (*file == ' ' || *file == '\t')
++			file++;
++
++		if (!*file)
++			return;	/* "initramfs" alone -- no filename */
++
++		/* Find address argument */
++		addr = file;
++		while (*addr && *addr != ' ' && *addr != '\t')
++			addr++;
++
++		if (*addr) {
++			*addr = '\0';
++			addr++;
++			while (*addr == ' ' || *addr == '\t')
++				addr++;
++		}
++
++		env_set(RPI_CFGTXT_ENV_PREFIX "initramfs", file);
++
++		if (*addr)
++			env_set(RPI_CFGTXT_ENV_PREFIX "initramfs_addr", addr);
++		else
++			env_set(RPI_CFGTXT_ENV_PREFIX "initramfs_addr",
++				"followkernel");
++		return;
++	}
++
++	/* Space-separated: include <filename> */
++	if (!strncmp(line, "include ", 8)) {
++		char *file = line + 8;
++
++		while (*file == ' ' || *file == '\t')
++			file++;
++
++		if (!*file)
++			return;
++
++		if (state->opts->include_cb &&
++		    state->opts->include_depth < RPI_CFGTXT_MAX_INCLUDE_DEPTH)
++			state->opts->include_cb(file, state->opts->include_ctx);
++		return;
++	}
++
++	/* Key=value lines */
++	eq = strchr(line, '=');
++	if (!eq)
++		return;	/* No '=' and not a known directive: skip */
++
++	*eq = '\0';
++
++	/* Multi-value keys */
++	if (!strcmp(line, "dtoverlay")) {
++		set_env_indexed(RPI_CFGTXT_ENV_PREFIX "dtoverlay",
++				&state->dtoverlay_count, eq + 1);
++		return;
++	}
++	if (!strcmp(line, "dtparam")) {
++		set_env_indexed(RPI_CFGTXT_ENV_PREFIX "dtparam",
++				&state->dtparam_count, eq + 1);
++		return;
++	}
++	if (!strcmp(line, "gpio")) {
++		set_env_indexed(RPI_CFGTXT_ENV_PREFIX "gpio",
++				&state->gpio_count, eq + 1);
++		return;
++	}
++
++	/* Simple key=value (last-wins) */
++	snprintf(name, sizeof(name), "%s%s", RPI_CFGTXT_ENV_PREFIX, line);
++	env_set(name, eq + 1);
++}
++
++/* --- Main parse loop --- */
++
++int rpi_cfgtxt_parse(const char *buf, size_t size,
++		     const struct rpi_cfgtxt_opts *opts)
++{
++	struct cfgtxt_state state;
++	const char *pos = buf;
++	const char *end = buf + size;
++
++	if (!buf || !size || !opts)
++		return -EINVAL;
++
++	memset(&state, 0, sizeof(state));
++	state.opts = opts;
++	/* All filters start as FILTER_UNSET (== 0) */
++
++	while (pos < end) {
++		pos = copy_line(pos, end, &state);
++		if (!state.line_buf[0])
++			continue;	/* blank line */
++		if (state.line_buf[0] == '#')
++			continue;	/* comment */
++		if (state.line_buf[0] == '[') {
++			eval_section_header(state.line_buf, &state);
++			continue;
++		}
++		if (line_accepted(&state))
++			handle_directive(state.line_buf, &state);
++	}
++	return 0;
++}
++
++/* --- Clear function --- */
++
++/* Struct to collect rpi_cfg_* variable names for deletion */
++struct clear_ctx {
++	const char **names;
++	int count;
++	int capacity;
++};
++
++static int collect_rpi_cfg_var(struct env_entry *entry)
++{
++	/* This callback is called from hwalk_r but we need context.
++	 * Use a simpler approach: hmatch_r with prefix matching. */
++	return 0;
++}
++
++int rpi_cfgtxt_clear(void)
++{
++	struct env_entry *match;
++	int idx = 0;
++	int removed = 0;
++	const char *names[256];
++	int count = 0;
++	int i;
++
++	/*
++	 * Collect all rpi_cfg_* variable names first, then delete them.
++	 * We can't delete during iteration as it would invalidate the
++	 * hash table state.
++	 */
++	while (count < ARRAY_SIZE(names) &&
++	       (idx = hmatch_r(RPI_CFGTXT_ENV_PREFIX, idx, &match,
++			       &env_htab))) {
++		if (!strncmp(match->key, RPI_CFGTXT_ENV_PREFIX,
++			     strlen(RPI_CFGTXT_ENV_PREFIX))) {
++			names[count++] = match->key;
++		}
++	}
++
++	/* Now delete them */
++	for (i = 0; i < count; i++) {
++		if (env_set(names[i], NULL) == 0)
++			removed++;
++	}
++
++	return removed;
++}
+-- 
+2.47.3
+
+
+From cfc430fad7c23f75dd92af927e682deb336720d2 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:42:11 +0930
+Subject: [PATCH 5/8] rpi: add cfgtxt command wrapper and build integration
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ cmd/Kconfig      |  9 +++++
+ cmd/Makefile     |  1 +
+ cmd/cfgtxt.c     | 98 ++++++++++++++++++++++++++++++++++++++++++++++++
+ lib/Makefile     |  1 +
+ lib/rpi_cfgtxt.c | 14 -------
+ 5 files changed, 109 insertions(+), 14 deletions(-)
+ create mode 100644 cmd/cfgtxt.c
+
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index 322ebe60..c12316be 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1894,6 +1894,15 @@ config CMD_ECHO
+ 	help
+ 	  Echo args to console
+ 
++config CMD_CFGTXT
++	bool "cfgtxt - Raspberry Pi config.txt parser"
++	depends on ARCH_BCM283X || SANDBOX
++	help
++	  Parse Raspberry Pi config.txt files and set rpi_cfg_*
++	  environment variables. Handles conditional sections,
++	  multi-value keys (dtoverlay, dtparam), and directives
++	  like initramfs. Full VideoCore GPU bootloader parity.
++
+ config CMD_ITEST
+ 	bool "itest"
+ 	default y
+diff --git a/cmd/Makefile b/cmd/Makefile
+index 4cd13d4f..ac6815ae 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -66,6 +66,7 @@ obj-$(CONFIG_CMD_CYCLIC) += cyclic.o
+ obj-$(CONFIG_CMD_EVENT) += event.o
+ obj-$(CONFIG_CMD_EXTENSION) += extension_board.o
+ obj-$(CONFIG_CMD_ECHO) += echo.o
++obj-$(CONFIG_CMD_CFGTXT) += cfgtxt.o
+ obj-$(CONFIG_ENV_IS_IN_EEPROM) += eeprom.o
+ obj-$(CONFIG_CMD_EEPROM) += eeprom.o
+ obj-$(CONFIG_EFI_CLIENT) += efi.o efi_common.o
+diff --git a/cmd/cfgtxt.c b/cmd/cfgtxt.c
+new file mode 100644
+index 00000000..f3826275
+--- /dev/null
++++ b/cmd/cfgtxt.c
+@@ -0,0 +1,98 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * cfgtxt - Raspberry Pi config.txt parser command
++ */
++
++#include <command.h>
++#include <mapmem.h>
++#include <rpi_cfgtxt.h>
++#include <vsprintf.h>
++
++static int do_cfgtxt_import(struct cmd_tbl *cmdtp, int flag,
++			    int argc, char *const argv[])
++{
++	struct rpi_cfgtxt_opts opts = {};
++	unsigned long addr, size;
++	const char *buf;
++	int model;
++
++	if (argc < 3)
++		return CMD_RET_USAGE;
++
++	addr = hextoul(argv[1], NULL);
++	size = hextoul(argv[2], NULL);
++
++	if (!size) {
++		printf("## Error: size is zero\n");
++		return CMD_RET_FAILURE;
++	}
++
++	if (argc >= 4) {
++		model = rpi_cfgtxt_model_from_str(argv[3]);
++		if (model < 0) {
++			printf("## Error: unknown model '%s'\n", argv[3]);
++			return CMD_RET_FAILURE;
++		}
++		opts.model = model;
++	} else {
++		/* Auto-detect: read board revision from VideoCore mailbox
++		 * (BCM2835_MBOX_TAG_GET_BOARD_REV) and map to model enum.
++		 * In QEMU raspi4b, this returns the Pi 4B revision.
++		 * Falls back to PI0 if detection fails. */
++		opts.model = RPI_MODEL_PI0;  /* TODO: implement auto-detect */
++	}
++
++	buf = map_sysmem(addr, size);
++	if (!buf) {
++		printf("## Error: cannot map 0x%lx\n", addr);
++		return CMD_RET_FAILURE;
++	}
++
++	if (rpi_cfgtxt_parse(buf, size, &opts)) {
++		unmap_sysmem(buf);
++		return CMD_RET_FAILURE;
++	}
++
++	unmap_sysmem(buf);
++	return CMD_RET_SUCCESS;
++}
++
++static int do_cfgtxt_clear(struct cmd_tbl *cmdtp, int flag,
++			   int argc, char *const argv[])
++{
++	int removed = rpi_cfgtxt_clear();
++
++	printf("Removed %d rpi_cfg_* variables\n", removed);
++	return CMD_RET_SUCCESS;
++}
++
++static struct cmd_tbl cmd_cfgtxt_sub[] = {
++	U_BOOT_CMD_MKENT(import, 5, 0, do_cfgtxt_import, "", ""),
++	U_BOOT_CMD_MKENT(clear, 1, 0, do_cfgtxt_clear, "", ""),
++};
++
++static int do_cfgtxt(struct cmd_tbl *cmdtp, int flag,
++		     int argc, char *const argv[])
++{
++	struct cmd_tbl *cp;
++
++	if (argc < 2)
++		return CMD_RET_USAGE;
++
++	cp = find_cmd_tbl(argv[1], cmd_cfgtxt_sub,
++			  ARRAY_SIZE(cmd_cfgtxt_sub));
++	if (!cp)
++		return CMD_RET_USAGE;
++
++	return cp->cmd(cmdtp, flag, argc - 1, argv + 1);
++}
++
++U_BOOT_CMD(
++	cfgtxt, 5, 0, do_cfgtxt,
++	"Raspberry Pi config.txt parser",
++	"import <addr> <size> [<model>] - parse config.txt, set rpi_cfg_* vars\n"
++	"cfgtxt clear                   - remove all rpi_cfg_* variables\n"
++	"\n"
++	"Models: pi0, pi02, pi1, cm1, pi2, pi3, cm3, pi4, pi4b,\n"
++	"        pi400, cm4, pi5, pi500, cm5"
++);
+diff --git a/lib/Makefile b/lib/Makefile
+index 70667f37..29a7f8c4 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -37,6 +37,7 @@ obj-$(CONFIG_ERRNO_STR) += errno_str.o
+ obj-$(CONFIG_FIT) += fdtdec_common.o
+ obj-$(CONFIG_TEST_FDTDEC) += fdtdec_test.o
+ obj-$(CONFIG_GZIP_COMPRESSED) += gzip.o
++obj-$(CONFIG_CMD_CFGTXT) += rpi_cfgtxt.o
+ 
+ # With QEMU the SMBIOS tables come from there, not from U-Boot
+ ifndef CONFIG_QFW_SMBIOS
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+index 552fe71d..a821d17f 100644
+--- a/lib/rpi_cfgtxt.c
++++ b/lib/rpi_cfgtxt.c
+@@ -469,20 +469,6 @@ int rpi_cfgtxt_parse(const char *buf, size_t size,
+ 
+ /* --- Clear function --- */
+ 
+-/* Struct to collect rpi_cfg_* variable names for deletion */
+-struct clear_ctx {
+-	const char **names;
+-	int count;
+-	int capacity;
+-};
+-
+-static int collect_rpi_cfg_var(struct env_entry *entry)
+-{
+-	/* This callback is called from hwalk_r but we need context.
+-	 * Use a simpler approach: hmatch_r with prefix matching. */
+-	return 0;
+-}
+-
+ int rpi_cfgtxt_clear(void)
+ {
+ 	struct env_entry *match;
+-- 
+2.47.3
+
+
+From 0c34e297b82c02743a1d886f1b86dd911cb791c9 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:50:09 +0930
+Subject: [PATCH 6/8] rpi: fix review issues in config.txt parser
+
+- Clear none_active on any section header, not just [all]
+- Fix dangling pointer in rpi_cfgtxt_clear() by copying key strings
+- Pass child opts with incremented depth to include callback
+- Use hextoull/dectoul instead of simple_strto* (upstream style)
+- Enlarge key name buffer to avoid silent truncation
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ include/rpi_cfgtxt.h | 10 ++++++++--
+ lib/rpi_cfgtxt.c     | 29 ++++++++++++++++++++---------
+ 2 files changed, 28 insertions(+), 11 deletions(-)
+
+diff --git a/include/rpi_cfgtxt.h b/include/rpi_cfgtxt.h
+index 8c103de1..1dd15040 100644
+--- a/include/rpi_cfgtxt.h
++++ b/include/rpi_cfgtxt.h
+@@ -30,10 +30,16 @@ enum rpi_board_model {
+ 	RPI_MODEL_COUNT,
+ };
+ 
++/* Forward declaration for callback typedef */
++struct rpi_cfgtxt_opts;
++
+ /* Include callback: called when parser encounters "include <file>".
+- * Callback should load the file and call rpi_cfgtxt_parse() recursively.
++ * Callback should load the file and call rpi_cfgtxt_parse() recursively
++ * using child_opts (which has include_depth already incremented).
+  * Returns 0 on success, -errno on failure. */
+-typedef int (*cfgtxt_include_fn)(const char *filename, void *ctx);
++typedef int (*cfgtxt_include_fn)(const char *filename,
++				 const struct rpi_cfgtxt_opts *child_opts,
++				 void *ctx);
+ 
+ #define RPI_CFGTXT_MAX_INCLUDE_DEPTH	8
+ #define RPI_CFGTXT_MAX_LINE_LEN		512
+diff --git a/lib/rpi_cfgtxt.c b/lib/rpi_cfgtxt.c
+index a821d17f..6a4cdfbb 100644
+--- a/lib/rpi_cfgtxt.c
++++ b/lib/rpi_cfgtxt.c
+@@ -201,6 +201,9 @@ static void eval_section_header(const char *line, struct cfgtxt_state *state)
+ 	memcpy(section, p, len);
+ 	section[len] = '\0';
+ 
++	/* Any section header clears [none] block */
++	state->none_active = false;
++
+ 	/* [all] - reset all filters */
+ 	if (!strcmp(section, "all")) {
+ 		state->model_filter = FILTER_UNSET;
+@@ -230,7 +233,7 @@ static void eval_section_header(const char *line, struct cfgtxt_state *state)
+ 	if (!strncmp(section, "serial=", 7)) {
+ 		unsigned long long serial;
+ 
+-		serial = simple_strtoull(section + 7, NULL, 16);
++		serial = hextoull(section + 7, NULL);
+ 		state->serial_filter = (serial == state->opts->serial) ?
+ 			FILTER_MATCH : FILTER_NOMATCH;
+ 		return;
+@@ -240,7 +243,7 @@ static void eval_section_header(const char *line, struct cfgtxt_state *state)
+ 	if (!strncmp(section, "partition=", 10)) {
+ 		int part;
+ 
+-		part = simple_strtoul(section + 10, NULL, 10);
++		part = dectoul(section + 10, NULL);
+ 		state->partition_filter = (part == state->opts->boot_partition) ?
+ 			FILTER_MATCH : FILTER_NOMATCH;
+ 		return;
+@@ -335,7 +338,7 @@ static const char *copy_line(const char *pos, const char *end,
+ static void set_env_indexed(const char *prefix, int *counter,
+ 			    const char *value)
+ {
+-	char name[64];
++	char name[RPI_CFGTXT_MAX_LINE_LEN + sizeof(RPI_CFGTXT_ENV_PREFIX)];
+ 
+ 	snprintf(name, sizeof(name), "%s_%d", prefix, *counter);
+ 	env_set(name, value);
+@@ -354,7 +357,7 @@ static void set_env_indexed(const char *prefix, int *counter,
+ static void handle_directive(char *line, struct cfgtxt_state *state)
+ {
+ 	char *eq;
+-	char name[64];
++	char name[RPI_CFGTXT_MAX_LINE_LEN + sizeof(RPI_CFGTXT_ENV_PREFIX)];
+ 
+ 	/* Space-separated: initramfs <file> [<addr>] */
+ 	if (!strncmp(line, "initramfs ", 10)) {
+@@ -401,8 +404,13 @@ static void handle_directive(char *line, struct cfgtxt_state *state)
+ 			return;
+ 
+ 		if (state->opts->include_cb &&
+-		    state->opts->include_depth < RPI_CFGTXT_MAX_INCLUDE_DEPTH)
+-			state->opts->include_cb(file, state->opts->include_ctx);
++		    state->opts->include_depth < RPI_CFGTXT_MAX_INCLUDE_DEPTH) {
++			struct rpi_cfgtxt_opts child_opts = *state->opts;
++
++			child_opts.include_depth = state->opts->include_depth + 1;
++			state->opts->include_cb(file, &child_opts,
++						state->opts->include_ctx);
++		}
+ 		return;
+ 	}
+ 
+@@ -474,21 +482,24 @@ int rpi_cfgtxt_clear(void)
+ 	struct env_entry *match;
+ 	int idx = 0;
+ 	int removed = 0;
+-	const char *names[256];
++	char names[256][64];
+ 	int count = 0;
+ 	int i;
+ 
+ 	/*
+ 	 * Collect all rpi_cfg_* variable names first, then delete them.
+ 	 * We can't delete during iteration as it would invalidate the
+-	 * hash table state.
++	 * hash table state.  Copy the key strings because env_set(name, NULL)
++	 * frees the env_entry, which would leave dangling pointers.
+ 	 */
+ 	while (count < ARRAY_SIZE(names) &&
+ 	       (idx = hmatch_r(RPI_CFGTXT_ENV_PREFIX, idx, &match,
+ 			       &env_htab))) {
+ 		if (!strncmp(match->key, RPI_CFGTXT_ENV_PREFIX,
+ 			     strlen(RPI_CFGTXT_ENV_PREFIX))) {
+-			names[count++] = match->key;
++			strlcpy(names[count], match->key,
++				sizeof(names[0]));
++			count++;
+ 		}
+ 	}
+ 
+-- 
+2.47.3
+
+
+From e340d6e57ce222c9714737475ee27c972b1ab8bf Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:53:35 +0930
+Subject: [PATCH 7/8] test: add unit tests for cfgtxt config.txt parser
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ test/cmd/Makefile |   1 +
+ test/cmd/cfgtxt.c | 302 ++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 303 insertions(+)
+ create mode 100644 test/cmd/cfgtxt.c
+
+diff --git a/test/cmd/Makefile b/test/cmd/Makefile
+index 8c9f1127..a55715c1 100644
+--- a/test/cmd/Makefile
++++ b/test/cmd/Makefile
+@@ -38,6 +38,7 @@ obj-$(CONFIG_CMD_PINMUX) += pinmux.o
+ obj-$(CONFIG_CMD_PWM) += pwm.o
+ obj-$(CONFIG_CMD_READ) += rw.o
+ obj-$(CONFIG_CMD_SETEXPR) += setexpr.o
++obj-$(CONFIG_CMD_CFGTXT) += cfgtxt.o
+ obj-$(CONFIG_CMD_TEMPERATURE) += temperature.o
+ ifdef CONFIG_NET
+ obj-$(CONFIG_CMD_WGET) += wget.o
+diff --git a/test/cmd/cfgtxt.c b/test/cmd/cfgtxt.c
+new file mode 100644
+index 00000000..1c1e09ff
+--- /dev/null
++++ b/test/cmd/cfgtxt.c
+@@ -0,0 +1,302 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Tests for cfgtxt command (Raspberry Pi config.txt parser)
++ */
++
++#include <command.h>
++#include <env.h>
++#include <mapmem.h>
++#include <rpi_cfgtxt.h>
++#include <test/test.h>
++#include <test/ut.h>
++
++#define CFGTXT_TEST(_name, _flags)	UNIT_TEST(_name, _flags, cfgtxt)
++
++/* Helper: write string to mapped memory and run cfgtxt import */
++static int cfgtxt_import(struct unit_test_state *uts,
++			 const char *cfg, const char *model)
++{
++	u8 *buf = map_sysmem(0x1000, RPI_CFGTXT_MAX_LINE_LEN * 10);
++	size_t len = strlen(cfg);
++	char cmd[128];
++
++	memcpy(buf, cfg, len);
++	run_command("cfgtxt clear", 0);
++	snprintf(cmd, sizeof(cmd), "cfgtxt import 1000 %lx %s",
++		 (unsigned long)len, model ? model : "pi4b");
++	run_command(cmd, 0);
++	unmap_sysmem(buf);
++	return 0;
++}
++
++/* Test basic key=value parsing */
++static int cfgtxt_test_basic_kv(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "kernel=kernel8.img\narm_64bit=1\n", "pi4b");
++	ut_asserteq_str("kernel8.img", env_get("rpi_cfg_kernel"));
++	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_basic_kv, 0);
++
++/* Test that # comment lines are skipped */
++static int cfgtxt_test_comments(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "# comment\nkernel=k8.img\n# another\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_comments, 0);
++
++/* Test that empty/blank lines are skipped */
++static int cfgtxt_test_blank_lines(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "\n\nkernel=k8.img\n\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_blank_lines, 0);
++
++/* Test that duplicate keys use last-wins semantics */
++static int cfgtxt_test_last_wins(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "kernel=first\nkernel=second\n", "pi4b");
++	ut_asserteq_str("second", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_last_wins, 0);
++
++/* Test that key= sets an empty string value */
++static int cfgtxt_test_empty_value(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "kernel=\n", "pi4b");
++	ut_asserteq_str("", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_empty_value, 0);
++
++/* Test that key=a=b preserves the second = in the value */
++static int cfgtxt_test_value_with_equals(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "dtparam=i2c_arm=on\n", "pi4b");
++	ut_asserteq_str("i2c_arm=on", env_get("rpi_cfg_dtparam_0"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_value_with_equals, 0);
++
++/* Test multi-value keys: dtoverlay _0, _1, _count */
++static int cfgtxt_test_multi_value(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"dtoverlay=vc4-kms-v3d\ndtoverlay=i2c-rtc\n", "pi4b");
++	ut_asserteq_str("vc4-kms-v3d", env_get("rpi_cfg_dtoverlay_0"));
++	ut_asserteq_str("i2c-rtc", env_get("rpi_cfg_dtoverlay_1"));
++	ut_asserteq_str("2", env_get("rpi_cfg_dtoverlay_count"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_multi_value, 0);
++
++/* Test space-separated initramfs with address */
++static int cfgtxt_test_initramfs_space(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "initramfs initramfs8 followkernel\n", "pi4b");
++	ut_asserteq_str("initramfs8", env_get("rpi_cfg_initramfs"));
++	ut_asserteq_str("followkernel",
++			env_get("rpi_cfg_initramfs_addr"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_initramfs_space, 0);
++
++/* Test initramfs without address defaults to followkernel */
++static int cfgtxt_test_initramfs_no_addr(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "initramfs initramfs8\n", "pi4b");
++	ut_asserteq_str("initramfs8", env_get("rpi_cfg_initramfs"));
++	ut_asserteq_str("followkernel",
++			env_get("rpi_cfg_initramfs_addr"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_initramfs_no_addr, 0);
++
++/* Test bare initramfs (no filename) is ignored */
++static int cfgtxt_test_initramfs_no_args(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "initramfs\nkernel=k8.img\n", "pi4b");
++	ut_assertnull(env_get("rpi_cfg_initramfs"));
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_initramfs_no_args, 0);
++
++/* Test [pi4] section applies when model is pi4b */
++static int cfgtxt_test_section_match(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "[pi4]\nkernel=matched\n", "pi4b");
++	ut_asserteq_str("matched", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_match, 0);
++
++/* Test [pi3] section is skipped when model is pi4b */
++static int cfgtxt_test_section_skip(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "[pi3]\nkernel=wrong\n", "pi4b");
++	ut_assertnull(env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_skip, 0);
++
++/* Test [all] resets all filters */
++static int cfgtxt_test_section_all_reset(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"[pi3]\nkernel=wrong\n[all]\nkernel=right\n", "pi4b");
++	ut_asserteq_str("right", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_all_reset, 0);
++
++/* Test [none] blocks lines until next section header */
++static int cfgtxt_test_section_none(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"[none]\nkernel=blocked\n[all]\nkernel=ok\n", "pi4b");
++	ut_asserteq_str("ok", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_none, 0);
++
++/* Test [pi4] then [pi3] replaces model filter (only pi3 active) */
++static int cfgtxt_test_section_replace(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"[pi4]\n[pi3]\nkernel=pi3only\n", "pi4b");
++	ut_assertnull(env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_replace, 0);
++
++/* Test different filter types combine with AND (model + serial) */
++static int cfgtxt_test_section_and(struct unit_test_state *uts)
++{
++	struct rpi_cfgtxt_opts opts = {
++		.model = RPI_MODEL_PI4,
++		.serial = 0xdeadbeef,
++	};
++	u8 *buf = map_sysmem(0x1000, 256);
++	const char *cfg = "[pi4]\n[serial=0xdeadbeef]\nkernel=both\n";
++
++	memcpy(buf, cfg, strlen(cfg));
++	run_command("cfgtxt clear", 0);
++	rpi_cfgtxt_parse((const char *)buf, strlen(cfg), &opts);
++	ut_asserteq_str("both", env_get("rpi_cfg_kernel"));
++
++	/* Verify wrong serial fails the AND */
++	opts.serial = 0x12345678;
++	run_command("cfgtxt clear", 0);
++	rpi_cfgtxt_parse((const char *)buf, strlen(cfg), &opts);
++	ut_assertnull(env_get("rpi_cfg_kernel"));
++
++	unmap_sysmem(buf);
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_section_and, 0);
++
++/* Test CRLF line endings */
++static int cfgtxt_test_crlf(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "kernel=k8.img\r\narm_64bit=1\r\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_crlf, 0);
++
++/* Test leading whitespace (spaces/tabs) is stripped */
++static int cfgtxt_test_leading_whitespace(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "  kernel=k8.img\n\tarm_64bit=1\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	ut_asserteq_str("1", env_get("rpi_cfg_arm_64bit"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_leading_whitespace, 0);
++
++/* Test cfgtxt clear removes all rpi_cfg_* env vars */
++static int cfgtxt_test_clear(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts, "kernel=k8.img\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	run_command("cfgtxt clear", 0);
++	ut_assertnull(env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_clear, 0);
++
++/* Test model string/enum/filter mapping */
++static int cfgtxt_test_model_matching(struct unit_test_state *uts)
++{
++	const char * const *filters;
++
++	/* pi4b maps to RPI_MODEL_PI4, which matches [pi4] */
++	ut_asserteq(RPI_MODEL_PI4,
++		     rpi_cfgtxt_model_from_str("pi4b"));
++	filters = rpi_cfgtxt_model_filters(RPI_MODEL_PI4);
++	ut_asserteq_str("pi4", filters[0]);
++	ut_assertnull(filters[1]);
++
++	/* pi400 maps to RPI_MODEL_PI400, which matches [pi4] and [pi400] */
++	ut_asserteq(RPI_MODEL_PI400,
++		     rpi_cfgtxt_model_from_str("pi400"));
++	filters = rpi_cfgtxt_model_filters(RPI_MODEL_PI400);
++	ut_asserteq_str("pi4", filters[0]);
++	ut_asserteq_str("pi400", filters[1]);
++	ut_assertnull(filters[2]);
++
++	/* Unknown model returns -1 */
++	ut_asserteq(-1, rpi_cfgtxt_model_from_str("pi99"));
++	ut_asserteq(-1, rpi_cfgtxt_model_from_str(NULL));
++
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_model_matching, 0);
++
++/* Test second import resets multi-value counters */
++static int cfgtxt_test_reimport_resets_counters(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"dtoverlay=first\ndtoverlay=second\n", "pi4b");
++	ut_asserteq_str("2", env_get("rpi_cfg_dtoverlay_count"));
++	/* Import again with only one overlay */
++	cfgtxt_import(uts, "dtoverlay=only\n", "pi4b");
++	ut_asserteq_str("1", env_get("rpi_cfg_dtoverlay_count"));
++	ut_asserteq_str("only", env_get("rpi_cfg_dtoverlay_0"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_reimport_resets_counters, 0);
++
++/* Test lines > 512 bytes are truncated, not crash */
++static int cfgtxt_test_long_line_truncation(struct unit_test_state *uts)
++{
++	char cfg[600];
++
++	memset(cfg, 'x', sizeof(cfg));
++	memcpy(cfg, "kernel=", 7);
++	cfg[sizeof(cfg) - 2] = '\n';
++	cfg[sizeof(cfg) - 1] = '\0';
++	cfgtxt_import(uts, cfg, "pi4b");
++	/* Key is "kernel", value is truncated but set */
++	ut_assertnonnull(env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_long_line_truncation, 0);
++
++/* Test lines without = and not a known directive are skipped */
++static int cfgtxt_test_malformed_line(struct unit_test_state *uts)
++{
++	cfgtxt_import(uts,
++		"this has no equals\nkernel=k8.img\nrandom junk\n", "pi4b");
++	ut_asserteq_str("k8.img", env_get("rpi_cfg_kernel"));
++	return 0;
++}
++CFGTXT_TEST(cfgtxt_test_malformed_line, 0);
+-- 
+2.47.3
+
+
+From 17f8198ee3b79db2d23d7245e5f6e7913b602c27 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 15:54:29 +0930
+Subject: [PATCH 8/8] test: add Python integration tests for cfgtxt command
+
+---
+ test/py/tests/test_cfgtxt.py | 40 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 40 insertions(+)
+ create mode 100644 test/py/tests/test_cfgtxt.py
+
+diff --git a/test/py/tests/test_cfgtxt.py b/test/py/tests/test_cfgtxt.py
+new file mode 100644
+index 00000000..12e1c323
+--- /dev/null
++++ b/test/py/tests/test_cfgtxt.py
+@@ -0,0 +1,40 @@
++# SPDX-License-Identifier: GPL-2.0+
++#
++# Tests for the cfgtxt (Raspberry Pi config.txt parser) command.
++
++import pytest
++
++
++@pytest.mark.buildconfigspec('cmd_cfgtxt')
++@pytest.mark.boardspec('sandbox')
++def test_cfgtxt_basic_import(ubman):
++    """Test basic config.txt parsing sets env vars."""
++    ram_base = 0x1000
++    cfg = b'kernel=kernel8.img\narm_64bit=1\n'
++    # Write config data to memory byte-by-byte
++    ubman.run_command('mw.b %x 0 100' % ram_base)
++    for i, b in enumerate(cfg):
++        ubman.run_command('mw.b %x %x' % (ram_base + i, b))
++    ubman.run_command('cfgtxt clear')
++    ubman.run_command('cfgtxt import %x %x pi4b' % (ram_base, len(cfg)))
++    response = ubman.run_command('printenv rpi_cfg_kernel')
++    assert 'kernel8.img' in response
++    response = ubman.run_command('printenv rpi_cfg_arm_64bit')
++    assert '1' in response
++
++
++@pytest.mark.buildconfigspec('cmd_cfgtxt')
++@pytest.mark.boardspec('sandbox')
++def test_cfgtxt_clear(ubman):
++    """Test cfgtxt clear removes all rpi_cfg_ vars."""
++    response = ubman.run_command('cfgtxt clear')
++    assert 'Removed' in response
++
++
++@pytest.mark.buildconfigspec('cmd_cfgtxt')
++@pytest.mark.boardspec('sandbox')
++def test_cfgtxt_error_zero_size(ubman):
++    """Test error on zero size."""
++    with ubman.disable_check('error_notification'):
++        response = ubman.run_command('cfgtxt import 1000 0 pi4b')
++    assert 'Error' in response
+-- 
+2.47.3
+
