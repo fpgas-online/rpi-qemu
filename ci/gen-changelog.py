@@ -25,6 +25,8 @@ from datetime import datetime
 PACKAGE = "qemu-rpi"
 MAINTAINER = "Tim Ansell <mithro@mithis.com>"
 DISTRO = "trixie"
+# Epoch 2 ensures these versions supersede the previous 1:11.0.0~rc2+ds-2+rpiN
+EPOCH = 2
 
 
 def _run_git(*args):
@@ -120,7 +122,7 @@ def git_author_date():
 
 def generate_changelog(version, date_str, messages):
     """Generate Debian changelog format."""
-    lines = [f"{PACKAGE} ({version}) {DISTRO}; urgency=medium", ""]
+    lines = [f"{PACKAGE} ({EPOCH}:{version}) {DISTRO}; urgency=medium", ""]
     for msg in messages:
         lines.append(f"  * {msg}")
     lines.append("")
@@ -137,6 +139,11 @@ def main():
 
     if "--version-only" in sys.argv:
         print(version)
+        return
+
+    if "--deb-version" in sys.argv:
+        # Full Debian version with epoch (for deb control files)
+        print(f"{EPOCH}:{version}")
         return
 
     date_str = git_author_date()

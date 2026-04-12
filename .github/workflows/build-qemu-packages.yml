@@ -230,8 +230,9 @@ jobs:
       - name: Build pxeboot deb
         run: |
           apt-get update && apt-get install -y python3
-          VERSION=$(python3 ci/gen-changelog.py --version-only)
-          echo "Pxeboot package version: $VERSION"
+          DEB_VERSION=$(python3 ci/gen-changelog.py --deb-version)
+          FILE_VERSION=$(python3 ci/gen-changelog.py --version-only)
+          echo "Pxeboot deb version: $DEB_VERSION (file: $FILE_VERSION)"
 
           PKG=tmp/pxeboot-pkg
           mkdir -p $PKG/usr/share/qemu-rpi-pxeboot
@@ -241,7 +242,7 @@ jobs:
           mkdir -p $PKG/DEBIAN
           cat > $PKG/DEBIAN/control <<CTRL
           Package: qemu-rpi-pxeboot
-          Version: ${VERSION}
+          Version: ${DEB_VERSION}
           Architecture: all
           Maintainer: Tim Ansell <mithro@mithis.com>
           Recommends: qemu-rpi-system-arm
@@ -251,7 +252,7 @@ jobs:
           CTRL
           sed -i 's/^          //' $PKG/DEBIAN/control
 
-          dpkg-deb --build $PKG "tmp/debs/qemu-rpi-pxeboot_${VERSION}_all.deb"
+          dpkg-deb --build $PKG "tmp/debs/qemu-rpi-pxeboot_${FILE_VERSION}_all.deb"
 
       - name: List all artifacts
         run: ls -lh tmp/debs/
@@ -413,7 +414,6 @@ jobs:
             **Or download the static binary** (no dependencies needed).
           files: |
             artifacts/qemu-rpi-debs/*.deb
-            artifacts/qemu-rpi-debs/*.dsc
             artifacts/qemu-rpi-static/*.tar.gz
           draft: false
           prerelease: false

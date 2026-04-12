@@ -103,12 +103,9 @@ def main():
     env["DEB_BUILD_OPTIONS"] = f"parallel={os.cpu_count() or 4} nocheck"
 
     # -d: skip dependency checking (deps installed by container/workflow)
+    # -b: binary-only (no source package — version auto-generated from
+    #     git describe doesn't match the orig tarball naming)
     run(["dpkg-buildpackage", "-us", "-uc", "-d", "-b"],
-        cwd=source_dir, check=True)
-
-    # Also build source-only package
-    print(f"\n=== Building source package ===")
-    run(["dpkg-buildpackage", "-us", "-uc", "-d", "-S"],
         cwd=source_dir, check=True)
 
     # Step 6: Collect output files
