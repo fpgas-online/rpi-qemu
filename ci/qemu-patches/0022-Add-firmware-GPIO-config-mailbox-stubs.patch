@@ -1,0 +1,58 @@
+From e5cb70089000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 12:00:00 +0930
+Subject: [PATCH] Add firmware GPIO config/state mailbox stubs
+
+The raspberrypi-exp-gpio kernel driver queries the VideoCore
+firmware via mailbox tags GET/SET_GPIO_CONFIG and GET/SET_GPIO_STATE.
+These tags were unhandled, causing "Failed to get GPIO config"
+errors and cascading regulator/LED probe failures.
+
+Add stub handlers that return success (gpio=0) with sensible
+defaults (direction=input, polarity=active-high, state=low).
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/misc/bcm2835_property.c | 26 ++++++++++++++++++++++++++
+ 1 file changed, 26 insertions(+)
+
+diff --git a/hw/misc/bcm2835_property.c b/hw/misc/bcm2835_property.c
+index 216a746c2..fdb241197 100644
+--- a/hw/misc/bcm2835_property.c
++++ b/hw/misc/bcm2835_property.c
+@@ -415,6 +415,32 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
+             }
+             break;
+         }
++        case RPI_FWREQ_GET_GPIO_STATE:
++            /* gpio=0 (success), state=0 (low) */
++            stl_le_phys(&s->dma_as, value + 12, 0);
++            stl_le_phys(&s->dma_as, value + 16, 0);
++            resplen = 8;
++            break;
++        case RPI_FWREQ_SET_GPIO_STATE:
++            /* gpio=0 (success); accept and ignore the state write */
++            stl_le_phys(&s->dma_as, value + 12, 0);
++            resplen = 8;
++            break;
++        case RPI_FWREQ_GET_GPIO_CONFIG:
++            /* gpio=0 (success), direction=1 (input), polarity=0, term_en=0,
++             * term_pull_up=0 */
++            stl_le_phys(&s->dma_as, value + 12, 0);
++            stl_le_phys(&s->dma_as, value + 16, 1);
++            stl_le_phys(&s->dma_as, value + 20, 0);
++            stl_le_phys(&s->dma_as, value + 24, 0);
++            stl_le_phys(&s->dma_as, value + 28, 0);
++            resplen = 20;
++            break;
++        case RPI_FWREQ_SET_GPIO_CONFIG:
++            /* gpio=0 (success); accept and ignore the config write */
++            stl_le_phys(&s->dma_as, value + 12, 0);
++            resplen = 24;
++            break;
+         default:
+             qemu_log_mask(LOG_UNIMP,
+                           "bcm2835_property: unhandled tag 0x%08x\n", tag);
+--
+2.47.3
+
