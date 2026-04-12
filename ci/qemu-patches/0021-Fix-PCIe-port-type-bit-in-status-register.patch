@@ -1,0 +1,55 @@
+From e5cb70089000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 12:00:00 +0930
+Subject: [PATCH] Fix PCIe: set PCIE_PORT bit in PCIE_MISC_PCIE_STATUS on
+ reset
+
+The zero-initialized vendor registers left PCIE_MISC_PCIE_STATUS
+bit 7 (PCIE_PORT) clear, indicating Endpoint mode.  The Linux
+brcm-pcie driver rejected this with "PCIe RC controller
+misconfigured as Endpoint" (EINVAL).  Set the bit to indicate Root
+Complex mode so the driver reaches the link-check path and reports
+"link down" (ENODEV) gracefully.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/arm/bcm2838_pcie.c         | 9 +++++++++
+ include/hw/arm/bcm2838_pcie.h | 3 +++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/hw/arm/bcm2838_pcie.c b/hw/arm/bcm2838_pcie.c
+index e5cb70089..61f0656a5 100644
+--- a/hw/arm/bcm2838_pcie.c
++++ b/hw/arm/bcm2838_pcie.c
+@@ -251,6 +251,14 @@ static void bcm2838_pcie_root_port_reset_hold(Object *obj, ResetType type)
+     }
+
+     memset(s->regs, 0x00, sizeof(s->regs));
++
++    /*
++     * Set PCIE_PORT bit in PCIE_MISC_PCIE_STATUS to indicate Root Complex
++     * mode. Without this, the Linux brcm-pcie driver reports "PCIe RC
++     * controller misconfigured as Endpoint" and returns -EINVAL.
++     */
++    *(uint32_t *)(s->regs + BCM2838_PCIE_MISC_PCIE_STATUS
++                  - PCIE_CONFIG_SPACE_SIZE) = BCM2838_PCIE_PCIE_PORT_MASK;
+ }
+
+ static void bcm2838_pcie_root_init(Object *obj)
+diff --git a/include/hw/arm/bcm2838_pcie.h b/include/hw/arm/bcm2838_pcie.h
+index 18ab04f24..6a715ad53 100644
+--- a/include/hw/arm/bcm2838_pcie.h
++++ b/include/hw/arm/bcm2838_pcie.h
+@@ -36,6 +36,9 @@ OBJECT_DECLARE_TYPE(BCM2838PcieRootState, BCM2838PcieRootClass,
+ #define BCM2838_PCIE_EXT_CFG_DATA   0x8000
+ #define BCM2838_PCIE_EXT_CFG_INDEX  0x9000
+
++#define BCM2838_PCIE_MISC_PCIE_STATUS   0x4068
++#define BCM2838_PCIE_PCIE_PORT_MASK     0x80    /* Bit 7: 1=RC, 0=EP */
++
+ struct BCM2838PcieRootState {
+     /*< private >*/
+     PCIESlot parent_obj;
+--
+2.47.3
+
