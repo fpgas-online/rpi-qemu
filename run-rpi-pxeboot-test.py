@@ -69,17 +69,24 @@ def setup_tftpboot():
     serial_dir = TFTPBOOT / SERIAL
     serial_dir.mkdir(parents=True, exist_ok=True)
 
+    # Prefer compressed kernel8.img (exercises gzip decompression in firmware)
+    # Fall back to uncompressed Image if compressed version unavailable
+    kernel8_gz = BASE / "test-images" / "kernel8.img"
     image = TFTPBOOT / "Image"
+    if kernel8_gz.exists():
+        kernel_src = kernel8_gz
+    elif image.exists():
+        kernel_src = image
+    else:
+        print(f"ERROR: No kernel found ({kernel8_gz} or {image})")
+        return False
+
     dtb = TFTPBOOT / "bcm2711-rpi-4-b.dtb"
     initrd = BASE / "test-images" / "test-initramfs.cpio.gz"
 
-    if not image.exists():
-        print(f"ERROR: {image} not found")
-        return False
-
     # Copy files into serial-prefixed directory
     for src, name in [
-        (image, "kernel8.img"),
+        (kernel_src, "kernel8.img"),
         (dtb, "bcm2711-rpi-4-b.dtb"),
     ]:
         dst = serial_dir / name
@@ -169,6 +176,7 @@ def run_test():
         ("DHCP",                "DHCP client bound"),
         ("TFTP config.txt",     f"{SERIAL}/config.txt"),
         ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
+        ("Gzip decompress",     "Decompressed kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
         ("USB controller",      "DWC OTG Controller"),
@@ -204,7 +212,8 @@ def run_test():
         s = line.strip()
         for kw in ["Raspberry Pi Bootloader", "Board serial",
                     "DHCP client bound", "Loading.*kernel8",
-                    "Starting kernel", "Booting Linux",
+                    "Decompressed kernel", "Starting kernel",
+                    "Booting Linux",
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
                     "Link is Up", "lease of",
                     "64 bytes from", "HTTPS fetch",
