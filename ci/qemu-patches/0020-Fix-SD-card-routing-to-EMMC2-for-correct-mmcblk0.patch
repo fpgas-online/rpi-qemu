@@ -1,0 +1,31 @@
+From 1581b5e0f0000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sat, 12 Apr 2026 12:00:00 +0930
+Subject: [PATCH] Fix SD card routing: use EMMC2 instead of EMMC1 for mmcblk0
+
+The GPIO SD bus multiplexer linked "sdbus-sdhci" to the base SoC's
+SDHCI (EMMC1 at 0x300000), causing the SD card to appear as mmcblk1.
+On real RPi 4B, the SD card uses EMMC2 (at 0x340000), which the DTB
+aliases as mmc0 -> mmcblk0.  Redirect the link to EMMC2 so RPi OS
+can find root=/dev/mmcblk0p2.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/arm/bcm2838_peripherals.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/hw/arm/bcm2838_peripherals.c b/hw/arm/bcm2838_peripherals.c
+index 47b0f588f..1581b5e0f 100644
+--- a/hw/arm/bcm2838_peripherals.c
++++ b/hw/arm/bcm2838_peripherals.c
+@@ -60,7 +60,7 @@ static void bcm2838_peripherals_init(Object *obj)
+     object_initialize_child(obj, "gpio", &s->gpio, TYPE_BCM2838_GPIO);
+
+     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhci",
+-                                   OBJECT(&s_base->sdhci.sdbus));
++                                   OBJECT(&s->emmc2.sdbus));
+     object_property_add_const_link(OBJECT(&s->gpio), "sdbus-sdhost",
+                                    OBJECT(&s_base->sdhost.sdbus));
+--
+2.47.3
+
