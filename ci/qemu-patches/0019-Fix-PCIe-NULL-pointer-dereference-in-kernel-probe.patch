@@ -1,0 +1,72 @@
+From e5cb70089000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 12 Apr 2026 12:00:00 +0930
+Subject: [PATCH] Fix PCIe: zero-init vendor regs and forward low-offset MMIO
+ to config space
+
+The guest Linux kernel panics in brcm_pcie_probe with a NULL pointer
+dereference when probing the BCM2711 PCIe controller.  Two bugs:
+
+1. bcm2838_pcie_root_port_reset_hold() filled vendor registers with
+   0xFF, making PCIE_MISC_PCIE_STATUS (offset 0x4068) report link-up
+   even though no downstream device exists.  The kernel proceeded to
+   enumerate a non-existent bus and crashed.  Fix: zero-init the
+   register array so link status correctly reports link-down.
+
+2. MMIO reads at offsets 0x0000-0x0FFF silently returned ~0 because
+   the unsigned subtraction (offset - PCIE_CONFIG_SPACE_SIZE)
+   underflowed.  On real BCM2711 hardware this range exposes the root
+   port PCI config space via MMIO.  Fix: forward these accesses to
+   pci_default_read/write_config().
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/4
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+---
+ hw/arm/bcm2838_pcie.c | 17 +++++++++++++++--
+ 1 file changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/hw/arm/bcm2838_pcie.c b/hw/arm/bcm2838_pcie.c
+index b56a1fd32..e5cb70089 100644
+--- a/hw/arm/bcm2838_pcie.c
++++ b/hw/arm/bcm2838_pcie.c
+@@ -37,7 +37,12 @@ static uint64_t bcm2838_pcie_host_read(void *opaque, hwaddr offset,
+     uint32_t *cfg_idx = (uint32_t *)(root_regs + BCM2838_PCIE_EXT_CFG_INDEX
+                                      - PCIE_CONFIG_SPACE_SIZE);
+
+-    if (offset - PCIE_CONFIG_SPACE_SIZE + size <= sizeof(s->root_port.regs)) {
++    if (offset < PCIE_CONFIG_SPACE_SIZE) {
++        /* Root port PCI config space, accessible via MMIO on real hardware */
++        value = pci_default_read_config(PCI_DEVICE(&s->root_port), offset,
++                                        size);
++    } else if (offset - PCIE_CONFIG_SPACE_SIZE + size
++               <= sizeof(s->root_port.regs)) {
+         switch (offset) {
+         case BCM2838_PCIE_EXT_CFG_DATA
+             ... BCM2838_PCIE_EXT_CFG_DATA + PCIE_CONFIG_SPACE_SIZE - 1:
+@@ -70,7 +75,12 @@ static void bcm2838_pcie_host_write(void *opaque, hwaddr offset,
+
+     trace_bcm2838_pcie_host_write(size, offset, value);
+
+-    if (offset - PCIE_CONFIG_SPACE_SIZE + size <= sizeof(s->root_port.regs)) {
++    if (offset < PCIE_CONFIG_SPACE_SIZE) {
++        /* Root port PCI config space, accessible via MMIO on real hardware */
++        pci_default_write_config(PCI_DEVICE(&s->root_port), offset, value,
++                                 size);
++    } else if (offset - PCIE_CONFIG_SPACE_SIZE + size
++               <= sizeof(s->root_port.regs)) {
+         switch (offset) {
+         case BCM2838_PCIE_EXT_CFG_DATA
+             ... BCM2838_PCIE_EXT_CFG_DATA + PCIE_CONFIG_SPACE_SIZE - 1:
+@@ -240,7 +250,7 @@ static void bcm2838_pcie_root_port_reset_hold(Object *obj, ResetType type)
+         rpc->parent_phases.hold(obj, type);
+     }
+
+-    memset(s->regs, 0xFF, sizeof(s->regs));
++    memset(s->regs, 0x00, sizeof(s->regs));
+ }
+
+ static void bcm2838_pcie_root_init(Object *obj)
+--
+2.47.3
+
