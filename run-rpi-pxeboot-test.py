@@ -98,10 +98,16 @@ def setup_tftpboot():
         if not dst.exists() or dst.stat().st_size != initrd.stat().st_size:
             shutil.copy2(initrd, dst)
 
-    # Create minimal config.txt
+    # Create config.txt with conditional sections to exercise cfgtxt parser
     config = serial_dir / "config.txt"
     if not config.exists():
-        config.write_text("kernel=kernel8.img\n")
+        config.write_text(
+            "[pi4]\n"
+            "kernel=kernel8.img\n"
+            "[all]\n"
+            "arm_64bit=1\n"
+            "enable_uart=1\n"
+        )
 
     # Create cmdline.txt
     cmdline = serial_dir / "cmdline.txt"
@@ -176,6 +182,7 @@ def run_test():
         ("DHCP",                "DHCP client bound"),
         ("TFTP config.txt",     f"{SERIAL}/config.txt"),
         ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
+        ("Config parsed",       "config.txt: kernel=kernel8.img"),
         ("Gzip decompress",     "Decompressed kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
