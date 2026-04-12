@@ -73,8 +73,10 @@ memset(s->regs, 0x00, sizeof(s->regs));
 /* Indicate Root Port mode (not Endpoint) in PCIE_MISC_PCIE_STATUS */
 uint32_t *pcie_status = (uint32_t *)(s->regs
     + BCM2838_PCIE_MISC_PCIE_STATUS - PCIE_CONFIG_SPACE_SIZE);
-*pcie_status = cpu_to_le32(BCM2838_PCIE_PCIE_PORT_MASK);
+*pcie_status = BCM2838_PCIE_PCIE_PORT_MASK;
 ```
+
+Note: plain assignment, no `cpu_to_le32()`. The `regs[]` array stores host-native values because the MMIO ops use `DEVICE_NATIVE_ENDIAN` and the read handler uses raw `memcpy`. Byte-swapping happens at the QEMU memory region boundary, not in the array.
 
 Result: Driver passes the port-type check, reaches the link check, sees link-down, prints "link down" and returns ENODEV gracefully.
 
@@ -102,14 +104,24 @@ None of these tags are handled in `bcm2835_property.c`. They fall through to the
 
 ### Fix
 
-Add case handlers in the `bcm2835_property_mbox_push()` switch statement:
+Add case handlers in the `bcm2835_property_mbox_push()` switch statement.
 
-- **GET_GPIO_STATE**: Return state=0 (pin low) for the requested GPIO number
-- **SET_GPIO_STATE**: Accept and ignore (no-op)
-- **GET_GPIO_CONFIG**: Return direction=input (1), polarity=active-high (0), term_en=0, term_pull_up=0
-- **SET_GPIO_CONFIG**: Accept and ignore (no-op)
+**Critical protocol detail**: The kernel driver (`gpio-raspberrypi-exp.c`) checks success with `if (ret || get.gpio != 0)`. The `gpio` field (first word of the response payload at `value+12`) is a **firmware error code**, not the GPIO number. It must be written as **0** to indicate success. Any non-zero value causes the driver to report failure.
 
-Each handler reads the GPIO number from the request buffer and writes the response fields. The `resplen` is set to the correct value so the response header indicates success.
+Response buffer layouts and `resplen` values:
+
+| Tag | resplen | Response fields (at value+12) |
+|-----|---------|-------------------------------|
+| GET_GPIO_STATE | 8 | gpio=0 (success), state=0 (low) |
+| SET_GPIO_STATE | 8 | gpio=0 (success), state=(echoed) |
+| GET_GPIO_CONFIG | 20 | gpio=0, direction=1 (input), polarity=0 (active-high), term_en=0, term_pull_up=0 |
+| SET_GPIO_CONFIG | 24 | gpio=0, direction, polarity, term_en, term_pull_up, state (all accepted, ignored) |
+
+Handlers:
+- **GET_GPIO_STATE**: Write gpio=0, state=0. resplen=8.
+- **SET_GPIO_STATE**: Write gpio=0. resplen=8. No-op.
+- **GET_GPIO_CONFIG**: Write gpio=0, direction=1, polarity=0, term_en=0, term_pull_up=0. resplen=20.
+- **SET_GPIO_CONFIG**: Write gpio=0. resplen=24. No-op (accept and ignore config).
 
 ### Files
 
