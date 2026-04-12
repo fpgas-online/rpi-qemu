@@ -178,7 +178,7 @@ jobs:
           cp ../../ci/vc-boot-pi4b.env board/raspberrypi/rpi/pxeboot.env
           # Apply U-Boot patches (cfgtxt parser, etc.)
           for p in ../../ci/uboot-patches/*.patch; do
-            [ -f "$p" ] && git am "$p"
+            [ -f "$p" ] && echo "Applying: $(basename $p)" && git apply "$p"
           done
           make rpi_4_qemu_pxeboot_defconfig
           make -j$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
