@@ -109,13 +109,18 @@ def setup_tftpboot():
             "enable_uart=1\n"
         )
 
-    # Create cmdline.txt
+    # Create cmdline.txt. Line 1 is the real kernel command line and
+    # must reach the kernel verbatim. Lines 2+ are deliberately present
+    # to exercise the VideoCore "first line only" rule: a real Raspberry
+    # Pi firmware discards everything from the first '\n' onwards, and
+    # our cmdlinetxt parser must do the same.
     cmdline = serial_dir / "cmdline.txt"
-    if not cmdline.exists():
-        cmdline.write_text(
-            "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 "
-            "loglevel=7 rdinit=/init\n"
-        )
+    cmdline.write_text(
+        "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 "
+        "loglevel=7 rdinit=/init\n"
+        "this_line_must_not_reach_kernel=yes\n"
+        "# and this comment line must not reach the kernel either\n"
+    )
 
     return True
 
@@ -183,6 +188,8 @@ def run_test():
         ("TFTP config.txt",     f"{SERIAL}/config.txt"),
         ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
         ("Config parsed",       "config.txt: kernel=kernel8.img"),
+        ("cmdline.txt line 1 applied",
+                                "Kernel command line: earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"),
         ("Gzip decompress",     "Decompressed kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
         ("GENET driver",        "bcmgenet"),
@@ -192,6 +199,14 @@ def run_test():
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
+    ]
+    # Negative checks: strings that must NOT appear, to prove the
+    # "first line only" rule from real VideoCore firmware works.
+    negative_checks = [
+        ("cmdline.txt line 2 discarded",
+                                "this_line_must_not_reach_kernel"),
+        ("cmdline.txt comment discarded",
+                                "and this comment line must not reach"),
     ]
     # Optional
     optional_checks = [
@@ -208,6 +223,12 @@ def run_test():
         if not found:
             all_pass = False
         print(f"  [{'PASS' if found else 'FAIL'}] {name}")
+
+    for name, pattern in negative_checks:
+        absent = pattern not in text
+        if not absent:
+            all_pass = False
+        print(f"  [{'PASS' if absent else 'FAIL'}] {name}")
 
     for name, pattern in optional_checks:
         found = pattern in text
