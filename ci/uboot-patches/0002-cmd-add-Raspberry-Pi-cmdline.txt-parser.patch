@@ -1,0 +1,463 @@
+diff --git a/cmd/Kconfig b/cmd/Kconfig
+index c12316be..87ead144 100644
+--- a/cmd/Kconfig
++++ b/cmd/Kconfig
+@@ -1903,6 +1903,18 @@ config CMD_CFGTXT
+ 	  multi-value keys (dtoverlay, dtparam), and directives
+ 	  like initramfs. Full VideoCore GPU bootloader parity.
+ 
++config CMD_CMDLINETXT
++	bool "cmdlinetxt - Raspberry Pi cmdline.txt parser"
++	depends on ARCH_BCM283X || SANDBOX
++	help
++	  Parse Raspberry Pi cmdline.txt files and set the bootargs
++	  environment variable. Matches VideoCore GPU bootloader
++	  behaviour: uses only the first line of the file, passes
++	  its bytes through verbatim (no comment stripping, no
++	  whitespace normalisation), and deletes bootargs if the
++	  first line is empty or whitespace-only so a caller-supplied
++	  default can take effect.
++
+ config CMD_ITEST
+ 	bool "itest"
+ 	default y
+diff --git a/cmd/Makefile b/cmd/Makefile
+index ac6815ae..e530b2b0 100644
+--- a/cmd/Makefile
++++ b/cmd/Makefile
+@@ -67,6 +67,7 @@ obj-$(CONFIG_CMD_EVENT) += event.o
+ obj-$(CONFIG_CMD_EXTENSION) += extension_board.o
+ obj-$(CONFIG_CMD_ECHO) += echo.o
+ obj-$(CONFIG_CMD_CFGTXT) += cfgtxt.o
++obj-$(CONFIG_CMD_CMDLINETXT) += cmdlinetxt.o
+ obj-$(CONFIG_ENV_IS_IN_EEPROM) += eeprom.o
+ obj-$(CONFIG_CMD_EEPROM) += eeprom.o
+ obj-$(CONFIG_EFI_CLIENT) += efi.o efi_common.o
+diff --git a/cmd/cmdlinetxt.c b/cmd/cmdlinetxt.c
+new file mode 100644
+index 00000000..ba625fbe
+--- /dev/null
++++ b/cmd/cmdlinetxt.c
+@@ -0,0 +1,58 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * cmdlinetxt - Raspberry Pi cmdline.txt parser command
++ *
++ * Reads a cmdline.txt buffer from memory and sets the bootargs
++ * environment variable using VideoCore GPU bootloader semantics.
++ * See include/rpi_cmdlinetxt.h and lib/rpi_cmdlinetxt.c for the
++ * parser rules.
++ */
++
++#include <command.h>
++#include <env.h>
++#include <mapmem.h>
++#include <rpi_cmdlinetxt.h>
++#include <vsprintf.h>
++
++static int do_cmdlinetxt(struct cmd_tbl *cmdtp, int flag,
++			 int argc, char *const argv[])
++{
++	unsigned long addr, size;
++	const char *buf;
++	int ret;
++
++	if (argc < 3)
++		return CMD_RET_USAGE;
++
++	addr = hextoul(argv[1], NULL);
++	size = hextoul(argv[2], NULL);
++
++	if (!size) {
++		/* Empty file -> delete bootargs, matching VideoCore's
++		 * fallback-to-defaults behaviour for empty cmdline.txt. */
++		ret = env_set("bootargs", NULL);
++		return ret == 0 ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
++	}
++
++	buf = map_sysmem(addr, size);
++	if (!buf) {
++		printf("## Error: cannot map 0x%lx\n", addr);
++		return CMD_RET_FAILURE;
++	}
++
++	ret = rpi_cmdlinetxt_parse(buf, size);
++	unmap_sysmem(buf);
++
++	return ret == 0 ? CMD_RET_SUCCESS : CMD_RET_FAILURE;
++}
++
++U_BOOT_CMD(
++	cmdlinetxt, 3, 0, do_cmdlinetxt,
++	"Raspberry Pi cmdline.txt parser",
++	"<addr> <size> - parse cmdline.txt first line, set bootargs\n"
++	"\n"
++	"Matches VideoCore GPU bootloader behaviour: reads only the\n"
++	"first line (bytes before the first LF), passes it through\n"
++	"verbatim with no comment/whitespace processing, and deletes\n"
++	"bootargs if the first line is empty or whitespace-only."
++);
+diff --git a/include/rpi_cmdlinetxt.h b/include/rpi_cmdlinetxt.h
+new file mode 100644
+index 00000000..08d360b5
+--- /dev/null
++++ b/include/rpi_cmdlinetxt.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0+ */
++/*
++ * Raspberry Pi cmdline.txt parser
++ *
++ * Mirrors the semantics of the VideoCore GPU bootloader's cmdline.txt
++ * handling, so pxeboot firmware built on U-Boot produces the same
++ * kernel command line as real Raspberry Pi hardware.
++ *
++ * Observed VideoCore firmware behaviour (documented at
++ * https://www.raspberrypi.com/documentation/computers/configuration.html
++ * and confirmed by Raspberry Pi engineers on the official forums):
++ *
++ *   - Only the first line of cmdline.txt is used. Everything from the
++ *     first newline onwards is ignored (including any subsequent
++ *     "comment" lines -- they are not specially recognised, they just
++ *     happen to be skipped because they are on line 2+).
++ *   - The first line is passed through as-is. '#' is not a comment
++ *     marker, whitespace is not collapsed, and leading/trailing spaces
++ *     are preserved.
++ *   - If the first line is empty or contains only whitespace, the
++ *     firmware falls back to its built-in default command line.
++ *   - CRLF line endings are not specially handled; a trailing '\r' is
++ *     passed through as part of the last token (a common user bug on
++ *     real hardware, reproduced here to match behaviour).
++ */
++
++#ifndef __RPI_CMDLINETXT_H
++#define __RPI_CMDLINETXT_H
++
++#include <linux/types.h>
++
++/**
++ * rpi_cmdlinetxt_parse() - Parse cmdline.txt and set the bootargs env var
++ *
++ * Extracts the first line of @buf (up to but not including the first
++ * LF byte, or up to @size if no LF is present) and stores it in the
++ * "bootargs" environment variable. If the first line is empty or
++ * contains only whitespace characters, "bootargs" is deleted so that
++ * a caller-supplied default can take effect.
++ *
++ * @buf:  Read-only buffer containing cmdline.txt content
++ * @size: Size of buffer in bytes
++ * Return: 0 on success, -errno on failure
++ */
++int rpi_cmdlinetxt_parse(const char *buf, size_t size);
++
++#endif /* __RPI_CMDLINETXT_H */
+diff --git a/lib/Makefile b/lib/Makefile
+index 29a7f8c4..d2ecb413 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -38,6 +38,7 @@ obj-$(CONFIG_FIT) += fdtdec_common.o
+ obj-$(CONFIG_TEST_FDTDEC) += fdtdec_test.o
+ obj-$(CONFIG_GZIP_COMPRESSED) += gzip.o
+ obj-$(CONFIG_CMD_CFGTXT) += rpi_cfgtxt.o
++obj-$(CONFIG_CMD_CMDLINETXT) += rpi_cmdlinetxt.o
+ 
+ # With QEMU the SMBIOS tables come from there, not from U-Boot
+ ifndef CONFIG_QFW_SMBIOS
+diff --git a/lib/rpi_cmdlinetxt.c b/lib/rpi_cmdlinetxt.c
+new file mode 100644
+index 00000000..d90ed40e
+--- /dev/null
++++ b/lib/rpi_cmdlinetxt.c
+@@ -0,0 +1,59 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Raspberry Pi cmdline.txt parser
++ *
++ * Matches VideoCore GPU bootloader behaviour: reads only the first
++ * line of cmdline.txt, passes bytes through as-is (no comment
++ * stripping, no whitespace normalisation), and falls back to a
++ * caller-supplied default if the first line is empty or
++ * whitespace-only. See include/rpi_cmdlinetxt.h for details.
++ */
++
++#include <env.h>
++#include <linux/ctype.h>
++#include <linux/errno.h>
++#include <linux/types.h>
++#include <malloc.h>
++#include <rpi_cmdlinetxt.h>
++#include <stdbool.h>
++#include <string.h>
++
++int rpi_cmdlinetxt_parse(const char *buf, size_t size)
++{
++	size_t i;
++	size_t line_len;
++	bool has_nonspace = false;
++	char *line;
++	int ret;
++
++	if (!buf)
++		return -EINVAL;
++
++	/* End of first line: position of first LF, or end of buffer. */
++	for (i = 0; i < size && buf[i] != '\n'; i++) {
++		if (!isspace((unsigned char)buf[i]))
++			has_nonspace = true;
++	}
++	line_len = i;
++
++	/*
++	 * Empty or whitespace-only first line -> delete bootargs so the
++	 * caller's default takes effect. This mirrors VideoCore firmware,
++	 * which substitutes its built-in default cmdline in this case.
++	 */
++	if (!has_nonspace)
++		return env_set("bootargs", NULL);
++
++	/* Copy the first line verbatim and NUL-terminate for env_set. */
++	line = malloc(line_len + 1);
++	if (!line)
++		return -ENOMEM;
++
++	memcpy(line, buf, line_len);
++	line[line_len] = '\0';
++
++	ret = env_set("bootargs", line);
++	free(line);
++
++	return ret;
++}
+diff --git a/test/cmd/Makefile b/test/cmd/Makefile
+index a55715c1..6c166827 100644
+--- a/test/cmd/Makefile
++++ b/test/cmd/Makefile
+@@ -39,6 +39,7 @@ obj-$(CONFIG_CMD_PWM) += pwm.o
+ obj-$(CONFIG_CMD_READ) += rw.o
+ obj-$(CONFIG_CMD_SETEXPR) += setexpr.o
+ obj-$(CONFIG_CMD_CFGTXT) += cfgtxt.o
++obj-$(CONFIG_CMD_CMDLINETXT) += cmdlinetxt.o
+ obj-$(CONFIG_CMD_TEMPERATURE) += temperature.o
+ ifdef CONFIG_NET
+ obj-$(CONFIG_CMD_WGET) += wget.o
+diff --git a/test/cmd/cmdlinetxt.c b/test/cmd/cmdlinetxt.c
+new file mode 100644
+index 00000000..6e87f022
+--- /dev/null
++++ b/test/cmd/cmdlinetxt.c
+@@ -0,0 +1,196 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * Tests for cmdlinetxt command (Raspberry Pi cmdline.txt parser).
++ *
++ * These tests verify that the parser reproduces VideoCore GPU
++ * bootloader semantics: first line only, pass-through verbatim,
++ * empty/whitespace-only line clears bootargs so defaults apply.
++ */
++
++#include <command.h>
++#include <env.h>
++#include <mapmem.h>
++#include <rpi_cmdlinetxt.h>
++#include <test/test.h>
++#include <test/ut.h>
++
++#define CMDLINETXT_TEST(_name, _flags)	UNIT_TEST(_name, _flags, cmdlinetxt)
++
++/*
++ * Helper: stage @content at a fixed sandbox address and run
++ * "cmdlinetxt <addr> <size>". Always clears bootargs first so
++ * tests see the parser's effect, not any stale value.
++ */
++static void cmdlinetxt_run(const char *content, size_t size)
++{
++	u8 *buf = map_sysmem(0x1000, 4096);
++	char cmd[64];
++
++	memcpy(buf, content, size);
++	env_set("bootargs", NULL);
++	snprintf(cmd, sizeof(cmd), "cmdlinetxt 1000 %lx",
++		 (unsigned long)size);
++	run_command(cmd, 0);
++	unmap_sysmem(buf);
++}
++
++/* Single line, no trailing LF: whole buffer becomes bootargs. */
++static int cmdlinetxt_test_single_line_no_lf(struct unit_test_state *uts)
++{
++	const char *content = "root=/dev/nfs rw console=ttyAMA0";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("root=/dev/nfs rw console=ttyAMA0",
++			env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_single_line_no_lf, 0);
++
++/* Single line with trailing LF: LF is stripped but nothing else. */
++static int cmdlinetxt_test_single_line_trailing_lf(struct unit_test_state *uts)
++{
++	const char *content = "root=/dev/nfs rw console=ttyAMA0\n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("root=/dev/nfs rw console=ttyAMA0",
++			env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_single_line_trailing_lf, 0);
++
++/*
++ * Two lines: VideoCore firmware uses line 1 only; line 2 is
++ * discarded even if it looks like a kernel command line.
++ */
++static int cmdlinetxt_test_two_lines_uses_first(struct unit_test_state *uts)
++{
++	const char *content =
++		"root=/dev/nfs\nignored=second rootwait=no\n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("root=/dev/nfs", env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_two_lines_uses_first, 0);
++
++/*
++ * Leading '#' on line 1: NOT a comment in VideoCore. The '#' and
++ * the rest of the line pass through as literal bootargs. This is
++ * the VideoCore-exact behaviour (bugs for the user, but matches).
++ */
++static int cmdlinetxt_test_hash_is_literal(struct unit_test_state *uts)
++{
++	const char *content = "# this looks like a comment\n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("# this looks like a comment",
++			env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_hash_is_literal, 0);
++
++/*
++ * Empty first line (just '\n') -> bootargs is deleted so the
++ * caller's default can kick in. Matches VideoCore "empty cmdline.txt
++ * falls back to built-in defaults".
++ */
++static int cmdlinetxt_test_empty_first_line(struct unit_test_state *uts)
++{
++	const char *content = "\nroot=/dev/second-line\n";
++
++	env_set("bootargs", "stale");
++	cmdlinetxt_run(content, strlen(content));
++	ut_assertnull(env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_empty_first_line, 0);
++
++/* Whitespace-only first line also clears bootargs. */
++static int cmdlinetxt_test_whitespace_only_line(struct unit_test_state *uts)
++{
++	const char *content = "   \t  \n";
++
++	env_set("bootargs", "stale");
++	cmdlinetxt_run(content, strlen(content));
++	ut_assertnull(env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_whitespace_only_line, 0);
++
++/*
++ * Leading whitespace on a non-empty first line is preserved --
++ * VideoCore does not trim.
++ */
++static int cmdlinetxt_test_leading_whitespace_preserved(
++					struct unit_test_state *uts)
++{
++	const char *content = "   root=/dev/nfs\n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("   root=/dev/nfs", env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_leading_whitespace_preserved, 0);
++
++/*
++ * Trailing whitespace before the LF is preserved too. Only the
++ * LF itself is excluded from the captured line.
++ */
++static int cmdlinetxt_test_trailing_whitespace_preserved(
++					struct unit_test_state *uts)
++{
++	const char *content = "root=/dev/nfs   \n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("root=/dev/nfs   ", env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_trailing_whitespace_preserved, 0);
++
++/*
++ * CRLF line ending: VideoCore does not treat '\r' specially, so
++ * the '\r' is included as the last char of bootargs (a known
++ * real-hardware quirk when users edit cmdline.txt on Windows).
++ */
++static int cmdlinetxt_test_crlf_preserves_cr(struct unit_test_state *uts)
++{
++	const char *content = "root=/dev/nfs\r\nignored\n";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str("root=/dev/nfs\r", env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_crlf_preserves_cr, 0);
++
++/*
++ * Exact reproduction of the cmdline.txt from issue #5 (252 bytes
++ * of NFS-root kernel args, no trailing LF). Verifies a realistic
++ * payload survives the parser unchanged.
++ */
++static int cmdlinetxt_test_issue5_cmdline(struct unit_test_state *uts)
++{
++	const char *content =
++		"root=/dev/nfs nfsroot=10.21.0.1:/srv/nfs/rpi/bookworm/root,"
++		"nfsvers=3 ro ip=dhcp rootwait consoleblank=0 "
++		"netconsole=@/,@10.21.0.1/ overlayroot=tmpfs "
++		"console=serial0,115200 systemd.log_level=debug "
++		"systemd.log_target=kmsg log_buf_len=1M printk.devkmsg=on";
++
++	cmdlinetxt_run(content, strlen(content));
++	ut_asserteq_str(content, env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_issue5_cmdline, 0);
++
++/*
++ * Empty buffer (size == 0) -> command wrapper clears bootargs
++ * directly without calling the parser. Exercise that path too.
++ */
++static int cmdlinetxt_test_zero_size(struct unit_test_state *uts)
++{
++	env_set("bootargs", "stale");
++	run_command("cmdlinetxt 1000 0", 0);
++	ut_assertnull(env_get("bootargs"));
++	return 0;
++}
++CMDLINETXT_TEST(cmdlinetxt_test_zero_size, 0);
+diff --git a/test/cmd_ut.c b/test/cmd_ut.c
+index 44e5fdfd..b6536f82 100644
+--- a/test/cmd_ut.c
++++ b/test/cmd_ut.c
+@@ -53,6 +53,7 @@ SUITE_DECL(bloblist);
+ SUITE_DECL(bootm);
+ SUITE_DECL(bootstd);
+ SUITE_DECL(cmd);
++SUITE_DECL(cmdlinetxt);
+ SUITE_DECL(common);
+ SUITE_DECL(dm);
+ SUITE_DECL(env);
+@@ -80,6 +81,7 @@ static struct suite suites[] = {
+ 	SUITE(bootm, "bootm command"),
+ 	SUITE(bootstd, "standard boot implementation"),
+ 	SUITE(cmd, "various commands"),
++	SUITE(cmdlinetxt, "Raspberry Pi cmdline.txt parser"),
+ 	SUITE(common, "tests for common/ directory"),
+ 	SUITE(dm, "driver model"),
+ 	SUITE(env, "environment"),
