@@ -28,6 +28,10 @@ from pathlib import Path
 BASE = Path(__file__).parent.resolve()
 REPO_ROOT = BASE.parent
 
+# Import the patch-setup helper from this directory
+sys.path.insert(0, str(BASE))
+from debian_patches import setup_debian_patches
+
 # Debian experimental's QEMU orig tarball - works correctly on Debian trixie
 ORIG_TARBALL_URL = (
     "https://deb.debian.org/debian/pool/main/q/qemu/"
@@ -90,12 +94,13 @@ def main():
         shutil.rmtree(debian_dst)
     shutil.copytree(BASE / "debian", debian_dst)
 
-    # Step 4: Copy our patches into debian/patches/
+    # Step 4: Install our patches and regenerate the series file.
+    # The series file is ALWAYS regenerated from the files on disk so
+    # a stale checked-in series can never drop patches — this was the
+    # root cause of fpgas-online/rpi-qemu#6.
     patches_src = BASE / "qemu-patches"
-    patches_dst = debian_dst / "patches"
-    for patch in sorted(patches_src.glob("*.patch")):
-        shutil.copy2(patch, patches_dst / patch.name)
-    print(f"  Copied {len(list(patches_src.glob('*.patch')))} patches")
+    n_patches = setup_debian_patches(debian_dst, patches_src)
+    print(f"  Installed {n_patches} patches and regenerated debian/patches/series")
 
     # Step 5: Build source and binary packages
     print(f"\n=== Building packages ===")
