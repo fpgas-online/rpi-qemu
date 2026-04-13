@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head><title>QEMU RPi APT Repository</title></head>
+<body>
+<h1>QEMU RPi APT Repository</h1>
+<p>QEMU with Raspberry Pi 4B GENET Ethernet support.</p>
+<h2>Usage</h2>
+<pre>
+# Add the repository
+echo "deb https://fpgas-online.github.io/rpi-qemu trixie main" | \
+  sudo tee /etc/apt/sources.list.d/qemu-rpi.list
+
+# Import the signing key (if signed)
+# curl -fsSL https://fpgas-online.github.io/rpi-qemu/repo-key.gpg | \
+#   sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/qemu-rpi.gpg
+
+# Install
+sudo apt-get update
+sudo apt-get install qemu-rpi-system-arm
+</pre>
+<h2>Packages</h2>
+<ul>
+<li><b>qemu-rpi-system-arm</b> - QEMU aarch64 emulator with RPi4B GENET</li>
+<li><b>qemu-rpi-system-data</b> - Data files for qemu-rpi</li>
+</ul>
+<p>Source: <a href="https://github.com/fpgas-online/rpi-qemu">github.com/fpgas-online/rpi-qemu</a></p>
+</body>
+</html>

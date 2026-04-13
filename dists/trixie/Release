@@ -1,0 +1,18 @@
+Origin: fpgas-online
+Label: QEMU RPi
+Suite: trixie
+Codename: trixie
+Architectures: amd64
+Components: main
+Description: QEMU with Raspberry Pi 4B GENET Ethernet support
+Date: Mon, 13 Apr 2026 13:38:05 +0000
+MD5Sum:
+ 953a6b960f6de848b27003284d390c81 3016 main/binary-amd64/Packages
+ 2995b516a6e31b6d0c5f3c2e5d7f3800 1356 main/binary-amd64/Packages.gz
+ d41d8cd98f00b204e9800998ecf8427e 0 main/source/Sources
+ f0af06ffe65069da0bffe32b1402ae5e 28 main/source/Sources.gz
+SHA256:
+ 42d4ed1723dc9410723d3a1f80e1d85a1e62fda81f1a543c3b420f514341f1de 3016 main/binary-amd64/Packages
+ 063feab1dd5c0334e9bbd8c3ca624d8323eee20c2906c3ac409217791896604e 1356 main/binary-amd64/Packages.gz
+ e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 0 main/source/Sources
+ 60799a67d30f92dcde7a589b97a4ea3bbccc6f5a28ff8e2c4c11b0f754e323ce 28 main/source/Sources.gz
