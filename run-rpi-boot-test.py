@@ -219,6 +219,7 @@ def run_test():
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
+        ("Watchdog disarm",     "WDT disarm: SUCCESS"),
     ]
     # Optional checks (reported but don't fail the test)
     # Ping may fail in CI environments that block ICMP

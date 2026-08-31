@@ -21,6 +21,20 @@ mkdir -p /dev/pts
 mount -t devpts devpts /dev/pts
 
 echo "=== QEMU RPi4B Network Test ==="
+
+# Replicate Raspberry Pi OS trixie's rpi_wd initramfs script: opening
+# /dev/watchdog0 arms the BCM2835 watchdog and the magic close ('V')
+# must disarm it.  Emulation that treats the arming RSTC write as an
+# immediate reset request reboots the machine right here, so simply
+# surviving this block is the regression test.
+echo "=== Watchdog disarm test (rpi_wd behaviour) ==="
+if [ -c /dev/watchdog0 ]; then
+    echo -n 'V' > /dev/watchdog0
+    echo "WDT disarm: SUCCESS"
+else
+    echo "WDT disarm: no /dev/watchdog0 device"
+fi
+
 echo "Waiting for network device..."
 sleep 2
 
