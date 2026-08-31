@@ -709,7 +709,9 @@ def run_test():
 
         # === Phase 4: Wait for Linux ===
         print("--- Phase 4: Waiting for Linux boot + network tests ---")
-        if not wait_for("Network test complete", timeout=120, label="network tests"):
+        # The initramfs bulk-transfer check adds ~15 s of connect
+        # timeouts here (the frame-level peer has no TCP bulk server).
+        if not wait_for("Network test complete", timeout=240, label="network tests"):
             print("  TIMEOUT waiting for network tests")
 
     finally:

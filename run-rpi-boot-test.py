@@ -22,8 +22,10 @@ Prerequisites:
 Usage: uv run run-rpi-boot-test.py
 """
 
+import hashlib
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -52,6 +54,50 @@ INITRD_ADDR = 0x12000000   # 288 MB - initramfs
 # on the serial console (the init script's dmesg grep searches for "dwc2"
 # which doesn't match the RPi kernel's "dwc_otg" driver name).
 BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"
+
+# Bulk-transfer server (regression check for rpi-qemu issue #12).
+# The guest opens ONE TCP connection to 10.0.2.2:BULK_PORT (slirp maps
+# it to host loopback) and requests 1 MB chunks with "GET\n" lines; the
+# per-chunk payload is deterministic so the guest can md5-verify it.
+BULK_PORT = 9876
+BULK_CHUNK = 1024 * 1024
+
+
+def bulk_server_thread():
+    """Serve 1 MB chunks over single long-lived connections, forever.
+
+    Accepts connections in a loop (sequentially) so a stray probe or a
+    reconnecting guest can't kill the server for the rest of the run.
+    Daemon thread: dies with the main process.
+    """
+    data = (hashlib.sha256(b"genet-bulk").digest()
+            * ((BULK_CHUNK // 32) + 1))[:BULK_CHUNK]
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", BULK_PORT))
+    srv.listen(1)
+    while True:
+        try:
+            conn, _ = srv.accept()
+            conn.settimeout(300)
+            buf = b""
+            while True:
+                while b"\n" not in buf:
+                    got = conn.recv(64)
+                    if not got:
+                        raise ConnectionResetError
+                    buf += got
+                line, buf = buf.split(b"\n", 1)
+                if line.strip() != b"GET":
+                    break
+                conn.sendall(data)
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except (OSError, UnboundLocalError):
+                pass
 
 
 def check_prerequisites():
@@ -99,6 +145,9 @@ def run_test():
     print("RPi4B QEMU Single-Instance Boot Test")
     print("  U-Boot → DHCP → TFTP → booti → Linux → Internet")
     print("=" * 70)
+
+    # Bulk-transfer server for the issue #12 regression check
+    threading.Thread(target=bulk_server_thread, daemon=True).start()
 
     proc = subprocess.Popen(
         [str(QEMU), "-M", "raspi4b",
@@ -189,8 +238,11 @@ def run_test():
         # === Phase 4: Wait for Linux to complete network tests ===
         print("--- Phase 4: Waiting for Linux boot + network tests ---")
 
-        # Wait for the init script to complete (up to 120 seconds)
-        if not wait_for("Network test complete", timeout=120, label="network tests"):
+        # Wait for the init script to complete.  The bulk-transfer test
+        # adds up to ~5x90s in the degenerate (regressed) case, so allow
+        # enough time for the init script's own per-chunk timeouts to
+        # fire and still produce a parseable FAILED verdict.
+        if not wait_for("Network test complete", timeout=600, label="network tests"):
             print("  TIMEOUT waiting for network tests!")
 
     finally:
@@ -220,6 +272,8 @@ def run_test():
         ("DHCP lease",          "lease of"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
         ("Watchdog disarm",     "WDT disarm: SUCCESS"),
+        ("Bulk transfer",       "Bulk transfer: SUCCESS"),
+        ("RX csum offload",     "RX csum: CLEAN"),
     ]
     # Optional checks (reported but don't fail the test)
     # Ping may fail in CI environments that block ICMP
@@ -252,6 +306,7 @@ def run_test():
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
                     "Link is Up", "lease of",
                     "64 bytes from", "HTTPS fetch",
+                    "Bulk chunk", "Bulk transfer", "RX csum",
                     "Network test complete"]:
             if kw in s:
                 print(f"  > {s[:130]}")

@@ -197,8 +197,10 @@ def run_test():
         # === Phase 3: Wait for Linux ===
         print("--- Phase 3: Waiting for Linux boot ---")
         # Network tests in initramfs will fail (no peer), but the
-        # init script completes gracefully regardless.
-        if not wait_for("Network test complete", timeout=120, label="init complete"):
+        # init script completes gracefully regardless.  The bulk
+        # transfer check adds ~15 s of connect timeouts in this
+        # peerless configuration, so allow extra headroom.
+        if not wait_for("Network test complete", timeout=240, label="init complete"):
             if wait_for("Booting Linux on physical CPU", timeout=5):
                 print("  Kernel booted (init script may still be running)")
             else:
