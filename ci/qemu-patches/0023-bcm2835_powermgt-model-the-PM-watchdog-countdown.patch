@@ -1,0 +1,184 @@
+From 1f5493151de4fe68b80782b2f14499ed540de815 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 31 Aug 2026 13:03:23 +0930
+Subject: [PATCH] bcm2835_powermgt: model the PM watchdog countdown instead of
+ resetting immediately
+
+Writing V_RSTC_RESET (0x20) to RSTC configures the BCM2835 watchdog to
+full-reset the machine when the countdown held in WDOG (ticks of
+1/65536 s) expires.  The old code treated any such write as an
+immediate reset request.  That made Linux's machine-restart path work
+(it arms the watchdog with 10 ticks, ~150 us), but it also meant that
+merely opening /dev/watchdog0 -- which runs bcm2835_wdt_start() with a
+seconds-scale timeout -- reset the machine on the spot.
+
+Raspberry Pi OS trixie does exactly that on every boot: the new
+raspberrypi-sys-mods initramfs script scripts/init-top/rpi_wd opens
+/dev/watchdog0 and writes the magic 'V' to disarm the bootloader
+watchdog.  Under emulation this produced an infinite boot loop.
+
+Arm a QEMU_CLOCK_VIRTUAL timer from the WDOG tick value instead
+(immediate when WDOG is 0), cancel it on RSTC writes without
+V_RSTC_RESET (the driver's stop()), and re-arm on WDOG writes while
+the timer is pending (watchdog keepalive).  The poweroff-partition
+check moves into the timer callback unchanged, so Linux reboot and
+poweroff behave as before while a watchdog arm followed by a magic
+close no longer resets the machine.
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/7
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_019vZfUM5Zqts1zPzRGs5GLJ
+---
+ hw/misc/bcm2835_powermgt.c         | 59 ++++++++++++++++++++++++++----
+ include/hw/misc/bcm2835_powermgt.h |  2 +
+ 2 files changed, 53 insertions(+), 8 deletions(-)
+
+diff --git a/hw/misc/bcm2835_powermgt.c b/hw/misc/bcm2835_powermgt.c
+index 3ec7aba..3771804 100644
+--- a/hw/misc/bcm2835_powermgt.c
++++ b/hw/misc/bcm2835_powermgt.c
+@@ -9,6 +9,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "qemu/host-utils.h"
+ #include "qemu/log.h"
+ #include "qemu/module.h"
+ #include "hw/misc/bcm2835_powermgt.h"
+@@ -23,6 +24,8 @@
+ #define R_RSTS 0x20
+ #define V_RSTS_POWEROFF 0x555 /* Linux uses partition 63 to indicate halt. */
+ #define R_WDOG 0x24
++#define V_WDOG_TIME_SET 0x000fffff
++#define WDOG_TICKS_PER_SEC 65536
+ 
+ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+@@ -52,6 +55,41 @@ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
+     return res;
+ }
+ 
++static void bcm2835_powermgt_wdt_expired(void *opaque)
++{
++    BCM2835PowerMgtState *s = (BCM2835PowerMgtState *)opaque;
++
++    if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
++        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
++    } else {
++        qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
++    }
++}
++
++/*
++ * Writing V_RSTC_RESET to RSTC arms the watchdog with the countdown held
++ * in WDOG (ticks of 1/65536 s).  Linux's machine-restart path arms it
++ * with 10 ticks (~150 us) to reboot, while the bcm2835_wdt watchdog
++ * driver arms seconds-scale timeouts when /dev/watchdog0 is opened --
++ * e.g. by Raspberry Pi OS trixie's rpi_wd initramfs script.  Model the
++ * countdown instead of resetting immediately, so arming the watchdog is
++ * distinguishable from a reboot request and a subsequent driver stop
++ * (RSTC write without V_RSTC_RESET) can cancel it.
++ */
++static void bcm2835_powermgt_wdt_arm(BCM2835PowerMgtState *s)
++{
++    uint32_t ticks = s->wdog & V_WDOG_TIME_SET;
++
++    if (ticks == 0) {
++        bcm2835_powermgt_wdt_expired(s);
++    } else {
++        timer_mod(&s->wdt_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
++                  muldiv64(ticks, NANOSECONDS_PER_SECOND,
++                           WDOG_TICKS_PER_SEC));
++    }
++}
++
+ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
+                                    uint64_t value, unsigned size)
+ {
+@@ -71,11 +109,10 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
+     case R_RSTC:
+         s->rstc = value;
+         if (value & V_RSTC_RESET) {
+-            if ((s->rsts & 0xfff) == V_RSTS_POWEROFF) {
+-                qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
+-            } else {
+-                qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+-            }
++            bcm2835_powermgt_wdt_arm(s);
++        } else {
++            /* bcm2835_wdt's stop() clears the reset configuration. */
++            timer_del(&s->wdt_timer);
+         }
+         break;
+     case R_RSTS:
+@@ -84,9 +121,11 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
+         s->rsts = value;
+         break;
+     case R_WDOG:
+-        qemu_log_mask(LOG_UNIMP,
+-                      "bcm2835_powermgt_write: WDOG\n");
+         s->wdog = value;
++        if (timer_pending(&s->wdt_timer)) {
++            /* Watchdog keepalive: restart the countdown. */
++            bcm2835_powermgt_wdt_arm(s);
++        }
+         break;
+ 
+     default:
+@@ -107,12 +146,13 @@ static const MemoryRegionOps bcm2835_powermgt_ops = {
+ 
+ static const VMStateDescription vmstate_bcm2835_powermgt = {
+     .name = TYPE_BCM2835_POWERMGT,
+-    .version_id = 1,
++    .version_id = 2,
+     .minimum_version_id = 1,
+     .fields = (const VMStateField[]) {
+         VMSTATE_UINT32(rstc, BCM2835PowerMgtState),
+         VMSTATE_UINT32(rsts, BCM2835PowerMgtState),
+         VMSTATE_UINT32(wdog, BCM2835PowerMgtState),
++        VMSTATE_TIMER_V(wdt_timer, BCM2835PowerMgtState, 2),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+@@ -124,6 +164,8 @@ static void bcm2835_powermgt_init(Object *obj)
+     memory_region_init_io(&s->iomem, obj, &bcm2835_powermgt_ops, s,
+                           TYPE_BCM2835_POWERMGT, 0x200);
+     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
++    timer_init_ns(&s->wdt_timer, QEMU_CLOCK_VIRTUAL,
++                  bcm2835_powermgt_wdt_expired, s);
+ }
+ 
+ static void bcm2835_powermgt_reset(DeviceState *dev)
+@@ -134,6 +176,7 @@ static void bcm2835_powermgt_reset(DeviceState *dev)
+     s->rstc = 0x00000102;
+     s->rsts = 0x00001000;
+     s->wdog = 0x00000000;
++    timer_del(&s->wdt_timer);
+ }
+ 
+ static void bcm2835_powermgt_class_init(ObjectClass *klass, const void *data)
+diff --git a/include/hw/misc/bcm2835_powermgt.h b/include/hw/misc/bcm2835_powermgt.h
+index fb0740c..72b2df6 100644
+--- a/include/hw/misc/bcm2835_powermgt.h
++++ b/include/hw/misc/bcm2835_powermgt.h
+@@ -12,6 +12,7 @@
+ #define BCM2835_POWERMGT_H
+ 
+ #include "hw/core/sysbus.h"
++#include "qemu/timer.h"
+ #include "qom/object.h"
+ 
+ #define TYPE_BCM2835_POWERMGT "bcm2835-powermgt"
+@@ -24,6 +25,7 @@ struct BCM2835PowerMgtState {
+     uint32_t rstc;
+     uint32_t rsts;
+     uint32_t wdog;
++    QEMUTimer wdt_timer;
+ };
+ 
+ #endif
+-- 
+2.55.0
+
