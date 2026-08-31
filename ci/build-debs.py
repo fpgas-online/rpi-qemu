@@ -19,6 +19,7 @@ Usage: uv run ci/build-debs.py [--output-dir DIR]
 """
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -32,10 +33,17 @@ REPO_ROOT = BASE.parent
 sys.path.insert(0, str(BASE))
 from debian_patches import setup_debian_patches
 
-# Debian experimental's QEMU orig tarball - works correctly on Debian trixie
+# Debian experimental's QEMU orig tarball - works correctly on Debian trixie.
+# Release-candidate tarballs disappear from the live pool once superseded
+# (this one 404s since ~mid-2026), so fall back to snapshot.debian.org,
+# which keeps every file forever, addressed by SHA-1.
 ORIG_TARBALL_URL = (
     "https://deb.debian.org/debian/pool/main/q/qemu/"
     "qemu_11.0.0~rc2+ds.orig.tar.xz"
+)
+ORIG_TARBALL_SHA1 = "5daaa43558896fa744349d8fc80db9ae4c0be94e"
+ORIG_TARBALL_SNAPSHOT_URL = (
+    f"https://snapshot.debian.org/file/{ORIG_TARBALL_SHA1}"
 )
 ORIG_TARBALL_NAME = "qemu-rpi_11.0.0~rc2+ds.orig.tar.xz"
 SOURCE_DIR_NAME = "qemu-rpi-11.0.0~rc2+ds"
@@ -72,7 +80,17 @@ def main():
     orig_tarball = work_dir / ORIG_TARBALL_NAME
     print(f"\n=== Downloading upstream tarball ===")
     if not orig_tarball.exists():
-        run(["wget", "-q", "-O", str(orig_tarball), ORIG_TARBALL_URL])
+        result = run(["wget", "-q", "-O", str(orig_tarball), ORIG_TARBALL_URL],
+                     check=False)
+        if result.returncode != 0:
+            print(f"  primary URL failed (rc={result.returncode}), "
+                  "falling back to snapshot.debian.org")
+            run(["wget", "-q", "-O", str(orig_tarball),
+                 ORIG_TARBALL_SNAPSHOT_URL])
+        digest = hashlib.sha1(orig_tarball.read_bytes()).hexdigest()
+        if digest != ORIG_TARBALL_SHA1:
+            sys.exit(f"orig tarball SHA-1 mismatch: {digest} != "
+                     f"{ORIG_TARBALL_SHA1}")
     print(f"  {orig_tarball} ({orig_tarball.stat().st_size / 1e6:.1f} MB)")
 
     # Step 2: Extract upstream source
