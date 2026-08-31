@@ -19,7 +19,7 @@ BASE = Path(__file__).parent.parent.resolve()
 NPROC = os.cpu_count() or 4
 
 # Versions - pinned for reproducibility
-QEMU_VERSION = "v11.0.0-rc2"
+QEMU_VERSION = "v11.1.0"
 QEMU_REPO = "https://gitlab.com/qemu-project/qemu.git"
 UBOOT_COMMIT = "47e064f13171f15817aa1b22b04e309964b15c2c"
 UBOOT_REPO = "https://github.com/u-boot/u-boot.git"

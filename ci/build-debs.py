@@ -2,7 +2,7 @@
 """
 Build Debian packages for QEMU with RPi GENET Ethernet support.
 
-Downloads the Debian experimental QEMU v11.0.0-rc2 orig tarball,
+Downloads the Debian QEMU v11.1.0 orig tarball,
 applies our debian/ packaging with GENET patches, and builds .deb packages.
 
 Must be run on Debian trixie (or compatible) to satisfy build dependencies.
@@ -33,20 +33,20 @@ REPO_ROOT = BASE.parent
 sys.path.insert(0, str(BASE))
 from debian_patches import setup_debian_patches
 
-# Debian experimental's QEMU orig tarball - works correctly on Debian trixie.
-# Release-candidate tarballs disappear from the live pool once superseded
-# (this one 404s since ~mid-2026), so fall back to snapshot.debian.org,
-# which keeps every file forever, addressed by SHA-1.
+# Debian's QEMU orig tarball - works correctly on Debian trixie.
+# Tarballs disappear from the live pool once superseded (the previous
+# 11.0.0~rc2 one 404s since ~mid-2026), so fall back to
+# snapshot.debian.org, which keeps every file forever, addressed by SHA-1.
 ORIG_TARBALL_URL = (
     "https://deb.debian.org/debian/pool/main/q/qemu/"
-    "qemu_11.0.0~rc2+ds.orig.tar.xz"
+    "qemu_11.1.0+ds.orig.tar.xz"
 )
-ORIG_TARBALL_SHA1 = "5daaa43558896fa744349d8fc80db9ae4c0be94e"
+ORIG_TARBALL_SHA1 = "320b6a3da46bfb0f79072d4f9ba635fd8d1a87ee"
 ORIG_TARBALL_SNAPSHOT_URL = (
     f"https://snapshot.debian.org/file/{ORIG_TARBALL_SHA1}"
 )
-ORIG_TARBALL_NAME = "qemu-rpi_11.0.0~rc2+ds.orig.tar.xz"
-SOURCE_DIR_NAME = "qemu-rpi-11.0.0~rc2+ds"
+ORIG_TARBALL_NAME = "qemu-rpi_11.1.0+ds.orig.tar.xz"
+SOURCE_DIR_NAME = "qemu-rpi-11.1.0+ds"
 
 
 def run(cmd, cwd=None, check=True):
@@ -98,7 +98,7 @@ def main():
     print(f"\n=== Extracting upstream source ===")
     run(["tar", "xf", str(orig_tarball), "-C", str(work_dir)])
 
-    # The tarball extracts to qemu-11.0.0-rc2/ - rename to match our source package name
+    # The tarball extracts to qemu-11.1.0/ - rename to match our source package name
     extracted_dirs = [d for d in work_dir.iterdir()
                       if d.is_dir() and d.name.startswith("qemu")]
     if extracted_dirs and extracted_dirs[0] != source_dir:
