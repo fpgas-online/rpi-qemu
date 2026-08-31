@@ -21,15 +21,15 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
  hw/arm/bcm2838.c                     | 19 ++++++++
  hw/arm/bcm2838_peripherals.c         | 65 ++++++++++++++++++++++++++++
  hw/arm/meson.build                   |  1 +
- hw/arm/raspi4b.c                     | 23 +---------
+ hw/arm/raspi4b.c                     | 25 +----------
  hw/misc/meson.build                  |  2 +
  hw/misc/trace-events                 | 10 +++++
  hw/net/meson.build                   |  2 +
  include/hw/arm/bcm2838_peripherals.h |  8 ++++
- 9 files changed, 112 insertions(+), 24 deletions(-)
+ 9 files changed, 112 insertions(+), 26 deletions(-)
 
 diff --git a/docs/system/arm/raspi.rst b/docs/system/arm/raspi.rst
-index 44eec3f1c..9ebf03632 100644
+index 44eec3f..9ebf036 100644
 --- a/docs/system/arm/raspi.rst
 +++ b/docs/system/arm/raspi.rst
 @@ -36,10 +36,12 @@ Implemented devices
@@ -48,10 +48,10 @@ index 44eec3f1c..9ebf03632 100644
 - * PCIE Root Port (raspi4b)
 - * GENET Ethernet Controller (raspi4b)
 diff --git a/hw/arm/bcm2838.c b/hw/arm/bcm2838.c
-index c14a85404..0899285be 100644
+index 089af41..9d96dc1 100644
 --- a/hw/arm/bcm2838.c
 +++ b/hw/arm/bcm2838.c
-@@ -205,6 +205,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
+@@ -209,6 +209,10 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
      sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->dwc2), 0,
                         qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_DWC2));
  
@@ -62,7 +62,7 @@ index c14a85404..0899285be 100644
      /* Connect DMA 0-6 to the interrupt controller */
      for (int n = GIC_SPI_INTERRUPT_DMA_0; n <= GIC_SPI_INTERRUPT_DMA_6; n++) {
          sysbus_connect_irq(SYS_BUS_DEVICE(&ps_base->dma),
-@@ -226,6 +230,21 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
+@@ -230,6 +234,21 @@ static void bcm2838_realize(DeviceState *dev, Error **errp)
      qdev_connect_gpio_out(dma_9_10_irq_orgate, 0,
                            qdev_get_gpio_in(gicdev, GIC_SPI_INTERRUPT_DMA_9_10));
  
@@ -85,7 +85,7 @@ index c14a85404..0899285be 100644
      qdev_init_gpio_in(dev, bcm2838_gic_set_irq, GIC_NUM_IRQS);
  
 diff --git a/hw/arm/bcm2838_peripherals.c b/hw/arm/bcm2838_peripherals.c
-index 812b5b848..47b0f588f 100644
+index 812b5b8..47b0f58 100644
 --- a/hw/arm/bcm2838_peripherals.c
 +++ b/hw/arm/bcm2838_peripherals.c
 @@ -15,6 +15,13 @@
@@ -189,22 +189,22 @@ index 812b5b848..47b0f588f 100644
                   CLOCK_ISP_SIZE);
  
 diff --git a/hw/arm/meson.build b/hw/arm/meson.build
-index b187b946f..bcf546409 100644
+index 4233a80..cf7f48a 100644
 --- a/hw/arm/meson.build
 +++ b/hw/arm/meson.build
-@@ -29,6 +29,7 @@ arm_common_ss.add(when: 'CONFIG_ALLWINNER_R40', if_true: files('allwinner-r40.c'
- arm_common_ss.add(when: 'CONFIG_MAX78000_SOC', if_true: files('max78000_soc.c'))
- arm_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2836.c', 'raspi.c'))
- arm_common_ss.add(when: ['CONFIG_RASPI', 'TARGET_AARCH64'], if_true: files('bcm2838.c', 'raspi4b.c'))
-+arm_common_ss.add(when: ['CONFIG_RASPI', 'TARGET_AARCH64'], if_true: files('bcm2838_pcie.c'))
+@@ -32,6 +32,7 @@ arm_common_ss.add(when: 'CONFIG_RASPI', if_true: files(
+   'raspi.c',
+   'raspi4b.c'
+ ))
++arm_common_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_pcie.c'))
  arm_common_ss.add(when: 'CONFIG_STM32F100_SOC', if_true: files('stm32f100_soc.c'))
  arm_common_ss.add(when: 'CONFIG_STM32F205_SOC', if_true: files('stm32f205_soc.c'))
  arm_common_ss.add(when: 'CONFIG_STM32F405_SOC', if_true: files('stm32f405_soc.c'))
 diff --git a/hw/arm/raspi4b.c b/hw/arm/raspi4b.c
-index 3eeb8f447..b9430309a 100644
+index 06aeb8d..b943030 100644
 --- a/hw/arm/raspi4b.c
 +++ b/hw/arm/raspi4b.c
-@@ -60,28 +60,7 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
+@@ -60,30 +60,7 @@ static void raspi_add_memory_node(void *fdt, hwaddr mem_base, hwaddr mem_len)
  
  static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
  {
@@ -220,12 +220,14 @@ index 3eeb8f447..b9430309a 100644
 -
 -    for (int i = 0; i < ARRAY_SIZE(nodes_to_remove); i++) {
 -        const char *dev_str = nodes_to_remove[i];
+-        int offset;
 -
--        int offset = fdt_node_offset_by_compatible(fdt, -1, dev_str);
--        if (offset >= 0) {
--            if (!fdt_nop_node(fdt, offset)) {
--                warn_report("bcm2711 dtc: %s has been disabled!", dev_str);
+-        offset = fdt_node_offset_by_compatible(fdt, -1, dev_str);
+-        while (offset >= 0) {
+-            if (fdt_nop_node(fdt, offset) == 0) {
+-                warn_report("bcm2711 dtb: %s has been disabled!", dev_str);
 -            }
+-            offset = fdt_node_offset_by_compatible(fdt, offset, dev_str);
 -        }
 -    }
 -
@@ -235,10 +237,10 @@ index 3eeb8f447..b9430309a 100644
      if (info->ram_size > UPPER_RAM_BASE) {
          raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
 diff --git a/hw/misc/meson.build b/hw/misc/meson.build
-index 092f70bde..68815de43 100644
+index 23265f6..1d0f7c4 100644
 --- a/hw/misc/meson.build
 +++ b/hw/misc/meson.build
-@@ -94,6 +94,8 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files(
+@@ -95,6 +95,8 @@ system_ss.add(when: 'CONFIG_RASPI', if_true: files(
    'bcm2835_cprman.c',
    'bcm2835_powermgt.c',
  ))
@@ -246,12 +248,12 @@ index 092f70bde..68815de43 100644
 +system_ss.add(when: 'CONFIG_RASPI', if_true: files('bcm2838_thermal.c'))
  system_ss.add(when: 'CONFIG_SLAVIO', if_true: files('slavio_misc.c'))
  system_ss.add(when: 'CONFIG_ZYNQ', if_true: files('zynq_slcr.c'))
- system_ss.add(when: 'CONFIG_XLNX_ZYNQMP_ARM', if_true: files('xlnx-zynqmp-crf.c'))
+ system_ss.add(when: 'CONFIG_XLNX_ZYNQ_DDRC', if_true: files('xlnx-zynq-ddrc.c'))
 diff --git a/hw/misc/trace-events b/hw/misc/trace-events
-index b88accc43..2976ad60f 100644
+index c9a868b..90e178e 100644
 --- a/hw/misc/trace-events
 +++ b/hw/misc/trace-events
-@@ -417,3 +417,13 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
+@@ -442,3 +442,13 @@ iommu_testdev_dma_read(uint64_t gva, uint32_t len) "gva=0x%" PRIx64 " len=%u"
  iommu_testdev_dma_verify(uint32_t expected, uint32_t actual) "expected=0x%x actual=0x%x"
  iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
  iommu_testdev_dma_armed(bool armed) "armed=%d"
@@ -266,10 +268,10 @@ index b88accc43..2976ad60f 100644
 +bcm2838_rng200_write(uint64_t addr, uint64_t value, unsigned size) "addr: 0x%"PRIx64" value: 0x%016" PRIx64 " size: %u"
 +bcm2838_rng200_read(uint64_t addr, unsigned size, uint64_t value) "addr: 0x%"PRIx64" size: %u value: 0x%016" PRIx64
 diff --git a/hw/net/meson.build b/hw/net/meson.build
-index 310258746..94f5caeb6 100644
+index 84f142d..e290e17 100644
 --- a/hw/net/meson.build
 +++ b/hw/net/meson.build
-@@ -70,4 +70,6 @@ system_ss.add(when: 'CONFIG_ROCKER', if_true: files(
+@@ -69,4 +69,6 @@ system_ss.add(when: 'CONFIG_ROCKER', if_true: files(
  stub_ss.add(files('rocker/rocker-stubs.c'))
  system_ss.add(files('rocker/rocker-hmp-cmds.c'))
  
@@ -277,7 +279,7 @@ index 310258746..94f5caeb6 100644
 +
  subdir('can')
 diff --git a/include/hw/arm/bcm2838_peripherals.h b/include/hw/arm/bcm2838_peripherals.h
-index 7ee1bd066..90885120e 100644
+index 0be97e6..9b1b821 100644
 --- a/include/hw/arm/bcm2838_peripherals.h
 +++ b/include/hw/arm/bcm2838_peripherals.h
 @@ -10,6 +10,10 @@
@@ -291,7 +293,7 @@ index 7ee1bd066..90885120e 100644
  #include "hw/sd/sdhci.h"
  #include "hw/gpio/bcm2838_gpio.h"
  
-@@ -63,8 +67,12 @@ struct BCM2838PeripheralState {
+@@ -64,8 +68,12 @@ struct BCM2838PeripheralState {
      MemoryRegion peri_low_mr_alias;
      MemoryRegion mphi_mr_alias;
  
@@ -306,4 +308,3 @@ index 7ee1bd066..90885120e 100644
      OrIRQState dma_7_8_irq_orgate;
 -- 
 2.47.3
-
