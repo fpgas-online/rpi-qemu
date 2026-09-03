@@ -95,7 +95,7 @@ jobs:
       - name: Clone and patch QEMU
         run: |
           # Use git clone (not Debian +ds tarball) so subprojects/slirp is available
-          git clone --depth=1 --branch v11.0.0-rc2 \
+          git clone --depth=1 --branch v11.1.0 \
             https://gitlab.com/qemu-project/qemu.git tmp/qemu-static-src
           cd tmp/qemu-static-src
           # Apply GENET patches (skip 0017 which is Debian +ds specific)
@@ -403,7 +403,7 @@ jobs:
           body: |
             QEMU with Raspberry Pi 4B GENET Ethernet support.
 
-            Based on QEMU v11.0.0-rc2 + 16 patches (Kambalin v6 GENET port).
+            Based on QEMU v11.1.0 + 23 patches (Kambalin v6 GENET port).
             PXE boot firmware with cfgtxt config.txt parser (full VideoCore parity).
 
             **Install via APT:**

@@ -156,7 +156,7 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 
 ```
 ci/
-  qemu-patches/          17 patches adding GENET Ethernet to QEMU v11.0.0-rc2
+  qemu-patches/          23 patches adding GENET Ethernet to QEMU v11.1.0
   debian/                Debian packaging for qemu-rpi-* packages
   vc-boot-pi4b.env       VideoCore boot emulation script (U-Boot environment)
   rpi_4_qemu_defconfig   U-Boot config for interactive testing
@@ -173,7 +173,7 @@ run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic so
 
 ### QEMU Patches
 
-17 patches on top of QEMU v11.0.0-rc2 (from Debian experimental), ported from Sergey Kambalin's Kambalin v6 series:
+23 patches on top of QEMU v11.1.0 (from Debian), ported from Sergey Kambalin's Kambalin v6 series:
 
 - **BCM2838 GENET Ethernet** -- Full DMA-based GbE MAC with MDIO/PHY, TX/RX descriptor rings
 - **BCM2838 PCIe Root Complex** -- Basic PCIe host bridge
