@@ -136,6 +136,13 @@ jobs:
           PXEBOOT_OVERRIDE=tmp/pxeboot-firmware/rpi4b-pxeboot.bin \
             python3 run-rpi-pxeboot-test.py
 
+      - name: Run PXE boot test from a flat TFTP root (prefix fallback)
+        if: github.event_name == 'workflow_run'
+        run: |
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) \
+          PXEBOOT_OVERRIDE=tmp/pxeboot-firmware/rpi4b-pxeboot.bin \
+          PXE_FLAT=1 python3 run-rpi-pxeboot-test.py
+
       - name: Upload test log on failure
         if: failure()
         uses: actions/upload-artifact@v4
