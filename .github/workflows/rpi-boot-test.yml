@@ -18,7 +18,7 @@ jobs:
       - name: Install base tools
         run: |
           apt-get update
-          apt-get install -y git ca-certificates
+          apt-get install -y git ca-certificates curl
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,8 +26,10 @@ jobs:
       - name: Install QEMU from APT repo
         run: |
           echo "=== Adding QEMU RPi APT repository ==="
-          echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" \
-            > /etc/apt/sources.list.d/qemu-rpi.list
+          install -d -m0755 /etc/apt/keyrings
+          curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg > /etc/apt/keyrings/rpi-qemu.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
+            > /etc/apt/sources.list.d/rpi-qemu.list
           apt-get update
 
           echo "=== Installing qemu-rpi-system-arm ==="
