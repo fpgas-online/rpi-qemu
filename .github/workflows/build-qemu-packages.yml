@@ -282,9 +282,6 @@ jobs:
       suites: "trixie"
       architectures: "amd64 all"
       description: "QEMU with Raspberry Pi 4B GENET Ethernet support"
-      # Transitional: the previous unsigned dists/trixie archive, frozen, for
-      # clients still using [trusted=yes]. Drop once they have moved.
-      legacy-paths: "dists/trixie"
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 
