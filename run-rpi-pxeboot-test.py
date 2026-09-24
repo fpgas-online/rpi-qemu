@@ -42,8 +42,14 @@ else:
                     str(BASE / "test-images" / "u-boot" / "u-boot.bin"))
 
 DTB = BASE / "test-images" / "bcm2711-rpi-4-b.dtb"
-TFTPBOOT = BASE / "test-images" / "tftpboot"
 SERIAL = "deadbeef"
+# PXE_FLAT=1 serves every file from the TFTP root with no <serial>/
+# directory, as a site that serves one boot dir to every Pi does: the
+# firmware must clear its TFTP prefix when <serial>/start4.elf is missing,
+# like the real bootloader.
+FLAT = os.environ.get("PXE_FLAT") == "1"
+TFTPBOOT = BASE / "test-images" / ("tftpboot-flat" if FLAT else "tftpboot")
+SRC_TFTPBOOT = BASE / "test-images" / "tftpboot"
 
 
 def check_prerequisites():
@@ -53,7 +59,7 @@ def check_prerequisites():
         ("QEMU with GENET", QEMU),
         ("PXE boot firmware", FIRMWARE),
         ("DTB", DTB),
-        ("TFTP root", TFTPBOOT),
+        ("TFTP root", SRC_TFTPBOOT),
     ]:
         if not path.exists():
             missing.append(f"  {name}: {path}")
@@ -65,14 +71,20 @@ def check_prerequisites():
 
 
 def setup_tftpboot():
-    """Set up TFTP root with Pi 4B layout under serial prefix."""
-    serial_dir = TFTPBOOT / SERIAL
+    """Set up TFTP root with Pi 4B layout under serial prefix (or flat)."""
+    serial_dir = TFTPBOOT if FLAT else TFTPBOOT / SERIAL
     serial_dir.mkdir(parents=True, exist_ok=True)
+    if not FLAT:
+        # The firmware keeps the <serial>/ prefix only if <serial>/start4.elf
+        # exists, as the real bootloader does; it is probed, never run.
+        start4 = serial_dir / "start4.elf"
+        if not start4.exists():
+            start4.write_bytes(b"placeholder: probed by the pxeboot firmware, never executed\n")
 
     # Prefer compressed kernel8.img (exercises gzip decompression in firmware)
     # Fall back to uncompressed Image if compressed version unavailable
     kernel8_gz = BASE / "test-images" / "kernel8.img"
-    image = TFTPBOOT / "Image"
+    image = SRC_TFTPBOOT / "Image"
     if kernel8_gz.exists():
         kernel_src = kernel8_gz
     elif image.exists():
@@ -81,7 +93,7 @@ def setup_tftpboot():
         print(f"ERROR: No kernel found ({kernel8_gz} or {image})")
         return False
 
-    dtb = TFTPBOOT / "bcm2711-rpi-4-b.dtb"
+    dtb = SRC_TFTPBOOT / "bcm2711-rpi-4-b.dtb"
     initrd = BASE / "test-images" / "test-initramfs.cpio.gz"
 
     # Copy files into serial-prefixed directory
@@ -182,11 +194,12 @@ def run_test():
     text = "".join(out_lines)
 
     # Required checks
+    prefix = "" if FLAT else f"{SERIAL}/"
     checks = [
         ("VC banner",           "Raspberry Pi Bootloader"),
         ("DHCP",                "DHCP client bound"),
-        ("TFTP config.txt",     f"{SERIAL}/config.txt"),
-        ("TFTP kernel",         f"{SERIAL}/kernel8.img"),
+        ("TFTP config.txt",     f"Loading {prefix}config.txt ..."),
+        ("TFTP kernel",         f"Loading {prefix}kernel8.img ..."),
         ("Config parsed",       "config.txt: kernel=kernel8.img"),
         ("cmdline.txt line 1 applied",
                                 "Kernel command line: earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"),
@@ -202,6 +215,8 @@ def run_test():
     ]
     # Negative checks: strings that must NOT appear, to prove the
     # "first line only" rule from real VideoCore firmware works.
+    if FLAT:
+        checks.append(("TFTP prefix cleared", f"{SERIAL}/start4.elf not found: TFTP prefix cleared"))
     negative_checks = [
         ("cmdline.txt line 2 discarded",
                                 "this_line_must_not_reach_kernel"),
