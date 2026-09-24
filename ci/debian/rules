@@ -42,7 +42,6 @@ CONFIGURE_OPTS = \
 	--disable-linux-aio \
 	--disable-linux-io-uring \
 	--disable-rbd \
-	--disable-glusterfs \
 	--disable-numa \
 	--disable-smartcard \
 	--disable-curses \
