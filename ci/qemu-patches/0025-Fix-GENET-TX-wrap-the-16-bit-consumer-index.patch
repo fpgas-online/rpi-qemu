@@ -1,0 +1,50 @@
+From c42877005d0b4f0a44116fda2e0263b8655a5e6c Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Thu, 24 Sep 2026 22:38:22 +0930
+Subject: [PATCH] Fix GENET TX: wrap the 16-bit consumer index
+
+bcm2838_genet_tx() walks TX descriptors while cons_index_fld !=
+prod_index_fld. Both start as the 16-bit INDEX fields of the
+PROD_INDEX/CONS_INDEX registers, but cons_index_fld was incremented as
+a plain uint32_t. When the guest's producer index wraps from 0xffff to
+0 while the consumer is still at 0xfffe/0xffff, cons_index_fld counts
+on to 0x10000, 0x10001, ... and never equals the small producer value
+again until it wraps at 2^32: the loop keeps reading descriptors while
+holding the BQL, so the main loop (serial, monitor, net backends) and
+the other vCPUs block behind it and the whole guest freezes.
+
+Seen in fpgas.online-infra's VM CI: every run froze the virtual Pi
+after its 65536th TX descriptor on a ring (~30 verify-pi tasks, ~5 min
+of SSH traffic), reported as "No route to host". gdb on the frozen
+process: CPU 2/TCG in bcm2838_genet_tx(ring_index=4, cons_index=65534)
+across samples, every other thread in qemu_mutex_lock(&bql).
+
+Wrap the consumer index with the same FIELD_EX32 used to extract it.
+---
+ hw/net/bcm2838_genet.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index 476f692..b3fecad 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -493,7 +493,15 @@ static uint64_t bcm2838_genet_tx(BCM2838GenetState *s, unsigned int ring_index,
+         }
+ 
+         num_descs++;
+-        cons_index_fld++;
++        /*
++         * PROD_INDEX/CONS_INDEX are 16-bit counters: wrap like the hardware.
++         * Left to count past 0xffff in 32 bits, cons_index_fld never equals
++         * a prod_index_fld that has just wrapped to a small value, and this
++         * loop spins (holding the BQL) for ~2^32 descriptors -- the whole VM
++         * froze after the guest's 65536th TX descriptor on a ring.
++         */
++        cons_index_fld = FIELD_EX32(cons_index_fld + 1,
++                                    GENET_DMA_CONS_INDEX, INDEX);
+         s->regs.tdma.descs[desc_index].length_status =
+             FIELD_DP32(s->regs.tdma.descs[desc_index].length_status,
+                        GENET_RDMA_LENGTH_STATUS, OWN, 1);
+-- 
+2.47.3
+
