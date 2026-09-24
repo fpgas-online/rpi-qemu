@@ -5,10 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# contents: write for the GitHub Release. Only the publish job gets Pages
+# rights, on its own job-level permissions.
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: build-qemu-packages
@@ -204,9 +204,11 @@ jobs:
           path: tmp/pxeboot-output/
           retention-days: 90
 
-  publish-apt-repo:
-    name: Publish APT repository
-    needs: [build-debs, build-static, build-pxeboot]
+  stage-apt:
+    # Gather this run's .debs (plus the pxeboot firmware deb, built here) into
+    # the artifact the shared publish workflow indexes: debs-<suite>-<arch>.
+    name: Stage APT packages
+    needs: [build-debs, build-pxeboot]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -257,118 +259,34 @@ jobs:
       - name: List all artifacts
         run: ls -lh tmp/debs/
 
-      - name: Import GPG key
-        if: env.APT_GPG_PRIVATE_KEY != ''
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
-          echo "$APT_GPG_PRIVATE_KEY" | gpg --batch --import
-          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format long | grep sec | head -1 | awk '{print $2}' | cut -d/ -f2)
-          echo "GPG_KEY_ID=$GPG_KEY_ID" >> "$GITHUB_ENV"
-          echo "GPG key imported: $GPG_KEY_ID"
-
-      - name: Build APT repository
-        run: |
-          REPO_DIR=tmp/apt-repo
-          mkdir -p $REPO_DIR/pool/main
-          mkdir -p $REPO_DIR/dists/trixie/main/binary-amd64
-          mkdir -p $REPO_DIR/dists/trixie/main/source
-
-          # Copy .deb files to pool
-          cp tmp/debs/*.deb $REPO_DIR/pool/main/ 2>/dev/null || true
-
-          # Copy source files to pool
-          cp tmp/debs/*.dsc $REPO_DIR/pool/main/ 2>/dev/null || true
-          cp tmp/debs/*.tar.xz $REPO_DIR/pool/main/ 2>/dev/null || true
-
-          # Generate Packages file
-          cd $REPO_DIR
-          dpkg-scanpackages --multiversion pool/main > dists/trixie/main/binary-amd64/Packages
-          gzip -9c dists/trixie/main/binary-amd64/Packages > dists/trixie/main/binary-amd64/Packages.gz
-
-          # Generate Sources file
-          dpkg-scansources pool/main > dists/trixie/main/source/Sources
-          gzip -9c dists/trixie/main/source/Sources > dists/trixie/main/source/Sources.gz
-
-          # Generate Release file
-          cd dists/trixie
-          cat > Release <<EOF
-          Origin: fpgas-online
-          Label: QEMU RPi
-          Suite: trixie
-          Codename: trixie
-          Architectures: amd64
-          Components: main
-          Description: QEMU with Raspberry Pi 4B GENET Ethernet support
-          Date: $(date -Ru)
-          EOF
-
-          # Add checksums
-          {
-            echo "MD5Sum:"
-            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz \
-                     main/source/Sources main/source/Sources.gz; do
-              [ -f "$f" ] && echo " $(md5sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
-            done
-            echo "SHA256:"
-            for f in main/binary-amd64/Packages main/binary-amd64/Packages.gz \
-                     main/source/Sources main/source/Sources.gz; do
-              [ -f "$f" ] && echo " $(sha256sum "$f" | cut -d' ' -f1) $(wc -c < "$f") $f"
-            done
-          } >> Release
-
-          # Sign if GPG key is available
-          if [ -n "$GPG_KEY_ID" ]; then
-            gpg --batch --yes -abs -o Release.gpg Release
-            gpg --batch --yes --clearsign -o InRelease Release
-            echo "APT repo signed with GPG key $GPG_KEY_ID"
-          else
-            echo "WARNING: No GPG key - APT repo is unsigned"
-            echo "Set APT_GPG_PRIVATE_KEY secret to enable signing"
-          fi
-
-          cd ../..
-
-      - name: Create repo index page
-        run: |
-          cat > tmp/apt-repo/index.html <<'HTMLEOF'
-          <!DOCTYPE html>
-          <html>
-          <head><title>QEMU RPi APT Repository</title></head>
-          <body>
-          <h1>QEMU RPi APT Repository</h1>
-          <p>QEMU with Raspberry Pi 4B GENET Ethernet support.</p>
-          <h2>Usage</h2>
-          <pre>
-          # Add the repository
-          echo "deb https://fpgas-online.github.io/rpi-qemu trixie main" | \
-            sudo tee /etc/apt/sources.list.d/qemu-rpi.list
-
-          # Import the signing key (if signed)
-          # curl -fsSL https://fpgas-online.github.io/rpi-qemu/repo-key.gpg | \
-          #   sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/qemu-rpi.gpg
-
-          # Install
-          sudo apt-get update
-          sudo apt-get install qemu-rpi-system-arm
-          </pre>
-          <h2>Packages</h2>
-          <ul>
-          <li><b>qemu-rpi-system-arm</b> - QEMU aarch64 emulator with RPi4B GENET</li>
-          <li><b>qemu-rpi-system-data</b> - Data files for qemu-rpi</li>
-          </ul>
-          <p>Source: <a href="https://github.com/fpgas-online/rpi-qemu">github.com/fpgas-online/rpi-qemu</a></p>
-          </body>
-          </html>
-          HTMLEOF
-
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: tmp/apt-repo
-          keep_files: false
-          force_orphan: true
+          name: debs-trixie-amd64
+          path: tmp/debs/*.deb
+          if-no-files-found: error
+
+  publish-apt-repo:
+    # Index, sign and deploy through the shared workflow: one flat repository
+    # per suite (<site>/trixie/), key rpi-qemu.gpg, Origin rpi-qemu -- the
+    # convention every apt repository follows (docs/conventions.md in
+    # mithro/apt-repo-action). It refuses to publish unsigned.
+    name: Publish APT repository
+    needs: stage-apt
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+    with:
+      suites: "trixie"
+      architectures: "amd64 all"
+      description: "QEMU with Raspberry Pi 4B GENET Ethernet support"
+      # Transitional: the previous unsigned dists/trixie archive, frozen, for
+      # clients still using [trusted=yes]. Drop once they have moved.
+      legacy-paths: "dists/trixie"
+    secrets:
+      gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
 
   create-release:
     name: Create GitHub Release
@@ -406,10 +324,12 @@ jobs:
             Based on QEMU v11.1.0 + 23 patches (Kambalin v6 GENET port).
             PXE boot firmware with cfgtxt config.txt parser (full VideoCore parity).
 
-            **Install via APT:**
+            **Install via APT** (Debian trixie, amd64; setup on https://fpgas.online/rpi-qemu/):
             ```
-            echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
-              sudo tee /etc/apt/sources.list.d/qemu-rpi.list
+            sudo install -d -m0755 /etc/apt/keyrings
+            curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg | sudo tee /etc/apt/keyrings/rpi-qemu.gpg > /dev/null
+            echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
+              | sudo tee /etc/apt/sources.list.d/rpi-qemu.list
             sudo apt-get update && sudo apt-get install qemu-rpi-system-arm qemu-rpi-pxeboot
             ```
 

@@ -33,9 +33,11 @@ This project patches QEMU to add Ethernet support to the `raspi4b` machine, maki
 ### APT (Debian trixie / amd64)
 
 ```bash
-# Add the repository
-echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" | \
-  sudo tee /etc/apt/sources.list.d/qemu-rpi.list
+# Add the repository (signed; setup also on https://fpgas.online/rpi-qemu/)
+sudo install -d -m0755 /etc/apt/keyrings
+curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg | sudo tee /etc/apt/keyrings/rpi-qemu.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
+  | sudo tee /etc/apt/sources.list.d/rpi-qemu.list
 sudo apt-get update
 
 # Install QEMU with RPi Ethernet support
@@ -116,9 +118,11 @@ jobs:
       - name: Install QEMU RPi
         run: |
           apt-get update
-          apt-get install -y ca-certificates
-          echo "deb [trusted=yes] https://fpgas-online.github.io/rpi-qemu trixie main" \
-            > /etc/apt/sources.list.d/qemu-rpi.list
+          apt-get install -y ca-certificates curl
+          install -d -m0755 /etc/apt/keyrings
+          curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg > /etc/apt/keyrings/rpi-qemu.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
+            > /etc/apt/sources.list.d/rpi-qemu.list
           apt-get update
           apt-get install -y qemu-rpi-system-arm qemu-rpi-pxeboot
 
