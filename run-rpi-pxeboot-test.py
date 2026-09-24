@@ -74,6 +74,12 @@ def setup_tftpboot():
     """Set up TFTP root with Pi 4B layout under serial prefix (or flat)."""
     serial_dir = TFTPBOOT if FLAT else TFTPBOOT / SERIAL
     serial_dir.mkdir(parents=True, exist_ok=True)
+    if not FLAT:
+        # The firmware keeps the <serial>/ prefix only if <serial>/start4.elf
+        # exists, as the real bootloader does; it is probed, never run.
+        start4 = serial_dir / "start4.elf"
+        if not start4.exists():
+            start4.write_bytes(b"placeholder: probed by the pxeboot firmware, never executed\n")
 
     # Prefer compressed kernel8.img (exercises gzip decompression in firmware)
     # Fall back to uncompressed Image if compressed version unavailable
