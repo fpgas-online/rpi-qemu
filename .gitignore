@@ -9,3 +9,6 @@ test-images/
 
 # Temporary files
 tmp/
+
+# Git worktrees (superpowers:using-git-worktrees)
+.worktrees/
