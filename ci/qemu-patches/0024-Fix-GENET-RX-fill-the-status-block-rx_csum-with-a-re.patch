@@ -1,0 +1,128 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Tue, 1 Sep 2026 02:23:06 +0930
+Subject: [PATCH] Fix GENET RX: fill the status block rx_csum with a real
+ packet checksum
+
+The Linux bcmgenet driver (all kernels with RSB support, including the
+6.12 and 6.18 Raspberry Pi OS kernels) consumes the rx_csum field of
+the 64-byte Receive Status Block as a CHECKSUM_COMPLETE value:
+
+    rx_csum = (__force __be16)(status->rx_csum & 0xffff);
+    if (rx_csum) {
+        skb->csum = (__force __wsum)ntohs(rx_csum);
+        skb->ip_summed = CHECKSUM_COMPLETE;
+    }
+
+CHECKSUM_COMPLETE means "the folded 16-bit one's-complement sum of the
+frame after the Ethernet header, exactly as csum_partial() would
+compute it".  On real hardware the RXCHK block provides this when
+RBUF_RXCHK_EN is set (bcmgenet_init_umac() always sets it).
+
+The emulation instead stored the received frame's IPv4 *header
+checksum field* (ip_sum) -- an unrelated value that is never the
+packet sum.  Every received IPv4 packet therefore advertised a bogus
+hardware checksum, with two consequences on every Linux guest:
+
+ * the kernel logs "eth0: hw csum failure" (netdev_rx_csum_fault) with
+   a full skb dump the first time a checksum is consumed, surfacing
+   through __skb_gro_checksum_complete/udp4_gro_receive or
+   __skb_checksum_complete/tcp_v4_rcv;
+
+ * every received TCP/UDP segment fails the hardware checksum
+   validation and only survives by taking a full software
+   csum_partial() pass over the payload
+   (__skb_gro_checksum_complete()/__skb_checksum_complete() fallback),
+   so the "hardware" offload adds work instead of removing it on
+   every single packet.  This is the RX-path overhead observed
+   alongside the SSH throughput collapse in
+   fpgas-online/fpgas.online-infra#37 CI (issue #12).
+
+Replace it with the checksum the driver expects: the folded (not
+complemented) one's-complement sum over the frame payload starting
+after the 14-byte Ethernet header, gated on RBUF_RXCHK_EN.  The value
+is stored in the guest-endian (LE) status block such that the driver's
+ntohs() recovers exactly what csum_partial() computes over the same
+bytes, so the kernel's checksum validation now succeeds without the
+software fallback and GRO coalescing works.
+
+The eth_get_protocols() call and its outputs were only used to fetch
+the IPv4 header checksum field and are removed.
+
+A/B tested with a slirp guest fetching 20 x 1 MB chunks over one TCP
+connection (repro for issue #12): with the unpatched device model BOTH
+the 6.18.39+rpt-rpi-v8 and 6.12.96+rpt-rpi-v8 kernels log the
+"hw csum failure" splat on first traffic; with this fix neither does,
+and all 20 chunks arrive md5-intact on both kernels (no regression).
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/12
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+---
+ hw/net/bcm2838_genet.c | 36 +++++++++++++++++++++---------------
+ 1 file changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index 476f692..13f4b00 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -856,12 +856,6 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+         MemTxResult mem_tx_result = MEMTX_OK;
+         uint8_t *frame_buf = dma_buf + sizeof(BCM2838GenetXmitStatus) + 2;
+         BCM2838GenetXmitStatus *xmit_status = (BCM2838GenetXmitStatus *)dma_buf;
+-        struct iovec iov;
+-        bool isip4, isip6;
+-        size_t l3hdr_off, l4hdr_off, l5hdr_off;
+-        eth_ip6_hdr_info ip6hdr_info;
+-        eth_ip4_hdr_info ip4hdr_info;
+-        eth_l4_hdr_info  l4hdr_info;
+ 
+         bool crc_fwd = FIELD_EX32(s->regs.umac.cmd, GENET_UMAC_CMD, CRC_FWD);
+         bool rbuf_64b_en = !!(s->regs.rbuf.ctrl & 1); /* RBUF_64B_EN */
+@@ -883,12 +877,6 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+         }
+ 
+         memcpy(frame_buf, buf + len, l);
+-        iov.iov_base = frame_buf;
+-        iov.iov_len = l;
+-        eth_get_protocols(&iov, 1, 0,
+-                          &isip4, &isip6,
+-                          &l3hdr_off, &l4hdr_off, &l5hdr_off,
+-                          &ip6hdr_info, &ip4hdr_info, &l4hdr_info);
+ 
+         len += l;
+ 
+@@ -915,10 +903,28 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+                                          !!is_packet_multicast(frame_buf, l));
+ 
+         if (rbuf_64b_en) {
+-            xmit_status->rx_csum = 0;
+-            if (isip4) {
+-                xmit_status->rx_csum = ip4hdr_info.ip4_hdr.ip_sum;
++            /*
++             * The Linux driver consumes rx_csum from the Receive Status
++             * Block as a CHECKSUM_COMPLETE value: the folded 16-bit
++             * one's-complement sum of the frame after the Ethernet
++             * header, computed by the RXCHK block when RBUF_RXCHK_EN
++             * is set.  It must match what the kernel's csum_partial()
++             * computes over the same bytes, or the kernel flags every
++             * packet as a hardware checksum fault ("hw csum failure")
++             * and falls back to software validation.
++             */
++            uint32_t rx_csum = 0;
++            bool rxchk_en = !!(s->regs.rbuf.chk_ctrl & 1); /* RBUF_RXCHK_EN */
++
++            if (rxchk_en && l > ETH_HLEN) {
++                uint32_t sum = net_checksum_add(l - ETH_HLEN,
++                                                frame_buf + ETH_HLEN);
++                /* Fold to 16 bits; do not complement. */
++                sum = (sum & 0xffff) + (sum >> 16);
++                sum = (sum & 0xffff) + (sum >> 16);
++                rx_csum = sum;
+             }
++            xmit_status->rx_csum = rx_csum;
+             xmit_status->length_status = desc->length_status;
+         }
+ 
+-- 
+2.55.0
+

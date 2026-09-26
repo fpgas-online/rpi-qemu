@@ -1,0 +1,209 @@
+From a4bfa0d2efb5d3d959708c948f32e65d35277e23 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sat, 26 Sep 2026 20:44:31 +0930
+Subject: [PATCH] Fix GENET RX: hold frames when the ring is full
+
+bcm2838_genet_rdma() filled the next RX descriptor and advanced
+PROD_INDEX for every frame without ever looking at CONS_INDEX, and
+can_receive() only checked that RDMA was enabled.  Whenever more frames
+arrive than the ring has free descriptors before the driver runs, the
+device laps the ring: it overwrites descriptors and buffers the driver
+has not consumed, and PROD_INDEX runs more than a ring ahead of
+CONS_INDEX, so the driver then walks descriptors it has already refilled
+but the device never wrote.  QEMU's socket backend makes this easy to
+hit: it delivers every complete frame of one read (up to ~68 KB) in a
+single main-loop pass, during which the guest cannot touch the NIC.
+
+Real GENET drops such frames and counts them in PROD_INDEX's DISCARD_CNT.
+Instead, apply backpressure the way e1000 and virtio-net do: count the
+free descriptors of the receiving ring as its START..END length minus
+(PROD_INDEX - CONS_INDEX) in the 16-bit index space; can_receive()
+reports false when none is free, receive() returns 0 so the net layer
+keeps the frame queued, and a CONS_INDEX write -- the driver releasing
+descriptors -- flushes the queue.  This keeps emulated RX lossless and
+leaves DISCARD_CNT at zero, which U-Boot relies on: it compares the
+whole 32-bit RDMA_PROD_INDEX register against its consumer index.
+
+Also move the flush that RDMA_CTRL's enable path already did to after
+the new value is stored.  It used to run before the memcpy, while
+DMA_CTRL.EN still read as 0, so receive() dropped every flushed frame.
+
+Test (fpgas-online/rpi-qemu run-rpi-socket-network-test.py): the
+frame-level peer writes 1000 60-byte UDP frames to a closed guest port
+in one sendall(); with the RPi 6.18.20-v8+ kernel the guest counts
+Udp NoPorts.  Before: noports=818 rx_errors=155.  After:
+noports=1000 rx_packets=1000 rx_errors=0.
+---
+ hw/net/bcm2838_genet.c | 111 ++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 93 insertions(+), 18 deletions(-)
+
+diff --git a/hw/net/bcm2838_genet.c b/hw/net/bcm2838_genet.c
+index b981e03..6dd5886 100644
+--- a/hw/net/bcm2838_genet.c
++++ b/hw/net/bcm2838_genet.c
+@@ -685,12 +685,15 @@ static uint64_t bcm2838_genet_read(void *opaque, hwaddr offset, unsigned size)
+     return value;
+ }
+ 
++static bool bcm2838_genet_can_receive(NetClientState *nc);
++
+ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+                                 unsigned size)
+ {
+     BCM2838GenetState *s = opaque;
+     MACAddr *mac = &s->nic_conf.macaddr;
+     NetClientState *ncs = qemu_get_queue(s->nic);
++    bool rx_flush = false;
+ 
+     trace_bcm2838_genet_write(size, offset, value);
+ 
+@@ -768,12 +771,24 @@ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+                     s->regs.rdma.status = 0;
+                     /*
+                      * RDMA just enabled -- flush any queued packets from
+-                     * the network backend so they get delivered now.
++                     * the network backend once the new value is stored.
+                      */
+-                    qemu_flush_queued_packets(qemu_get_queue(s->nic));
++                    rx_flush = true;
+                 }
+             }
+             break;
++        case BCM2838_GENET_RDMA_RINGS
++            ... BCM2838_GENET_RDMA_RINGS + sizeof(s->regs.rdma.rings) - 1:
++            /*
++             * The driver released RX descriptors: deliver the frames
++             * held back while the ring was full.
++             */
++            if ((offset - BCM2838_GENET_RDMA_RINGS)
++                    % sizeof(BCM2838GenetRdmaRing)
++                == BCM2838_GENET_RRING_CONS_INDEX) {
++                rx_flush = true;
++            }
++            break;
+         default:
+             break;
+         }
+@@ -781,6 +796,10 @@ static void bcm2838_genet_write(void *opaque, hwaddr offset, uint64_t value,
+         memcpy((uint8_t *)&s->regs + offset, &value, size);
+         bcm2838_genet_set_irq_default(s);
+         bcm2838_genet_set_irq_prio(s);
++
++        if (rx_flush && bcm2838_genet_can_receive(ncs)) {
++            qemu_flush_queued_packets(ncs);
++        }
+     } else {
+         qemu_log_mask(
+             LOG_GUEST_ERROR,
+@@ -985,6 +1004,58 @@ static ssize_t bcm2838_genet_rdma(BCM2838GenetState *s, uint32_t ring_idx,
+     return len;
+ }
+ 
++/*
++ * Ring that receives frames no HFB filter claims:
++ * - Linux driver uses ring 0 (HFB filter 0 directs default
++ *   traffic there, NAPI only runs on ring 0)
++ * - U-Boot uses ring 16 (DESC_INDEX, the hardware default)
++ *
++ * Check which ring has descriptors configured (non-zero
++ * start/end addresses indicate the ring is set up).
++ */
++static unsigned int bcm2838_genet_default_rx_ring(BCM2838GenetState *s)
++{
++    if (s->regs.rdma.rings[0].start_addr != 0 ||
++        s->regs.rdma.rings[0].end_addr != 0) {
++        return 0;
++    }
++    return BCM2838_GENET_DMA_RING_CNT - 1;
++}
++
++/*
++ * Number of descriptors in an RX ring the device may still fill: the ring
++ * length (START..END, the span bcm2838_genet_rdma() wraps write_ptr over)
++ * minus the descriptors filled but not yet released by the driver, i.e.
++ * PROD_INDEX - CONS_INDEX in the 16-bit index space.  The driver advances
++ * CONS_INDEX after each frame it takes (Linux bcmgenet_desc_rx(), U-Boot
++ * bcmgenet_gmac_free_pkt()); filling past it would overwrite descriptors
++ * and buffers the driver has not consumed yet.
++ */
++static uint32_t bcm2838_genet_rdma_free_descs(BCM2838GenetState *s,
++                                              unsigned int ring_idx)
++{
++    const size_t DESC_WORD_SIZE =
++        sizeof(BCM2838GenetRdmaDesc) / sizeof(uint32_t);
++    BCM2838GenetRdmaRing *ring = &s->regs.rdma.rings[ring_idx];
++    hwaddr start_index =
++        (ring->start_addr + ((hwaddr)ring->start_addr_hi << 32))
++            / DESC_WORD_SIZE;
++    hwaddr end_index =
++        (ring->end_addr + ((hwaddr)ring->end_addr_hi << 32)) / DESC_WORD_SIZE;
++    uint32_t ring_len;
++    uint32_t used;
++
++    if (end_index < start_index) {
++        return 0;
++    }
++    ring_len = end_index - start_index + 1;
++    used = (FIELD_EX32(ring->prod_index, GENET_DMA_PROD_INDEX, INDEX)
++            - FIELD_EX32(ring->cons_index, GENET_DMA_CONS_INDEX, INDEX))
++           & R_GENET_DMA_PROD_INDEX_INDEX_MASK;
++
++    return used < ring_len ? ring_len - used : 0;
++}
++
+ static bool bcm2838_genet_can_receive(NetClientState *nc)
+ {
+     BCM2838GenetState *s = (BCM2838GenetState *)qemu_get_nic_opaque(nc);
+@@ -994,7 +1065,13 @@ static bool bcm2838_genet_can_receive(NetClientState *nc)
+         return false;
+     }
+ 
+-    return true;
++    /*
++     * ... and a free descriptor on the receiving ring.  Returning false
++     * makes the backend hold frames instead of dropping them; they are
++     * flushed when the driver releases descriptors (CONS_INDEX write).
++     */
++    return bcm2838_genet_rdma_free_descs(s,
++                                         bcm2838_genet_default_rx_ring(s)) > 0;
+ }
+ 
+ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+@@ -1013,21 +1090,19 @@ static ssize_t bcm2838_genet_receive(NetClientState *nc, const uint8_t *buf,
+         if (filter_index >= 0) {
+             ring_index = bcm2838_genet_filter2ring(s, filter_index);
+         } else {
+-            /*
+-             * No HFB filter match. Determine the active default ring:
+-             * - Linux driver uses ring 0 (HFB filter 0 directs default
+-             *   traffic there, NAPI only runs on ring 0)
+-             * - U-Boot uses ring 16 (DESC_INDEX, the hardware default)
+-             *
+-             * Check which ring has descriptors configured (non-zero
+-             * start/end addresses indicate the ring is set up).
+-             */
+-            if (s->regs.rdma.rings[0].start_addr != 0 ||
+-                s->regs.rdma.rings[0].end_addr != 0) {
+-                ring_index = 0;
+-            } else {
+-                ring_index = BCM2838_GENET_DMA_RING_CNT - 1;
+-            }
++            ring_index = bcm2838_genet_default_rx_ring(s);
++        }
++
++        /*
++         * A frame of at most MAX_PACKET_SIZE takes exactly one descriptor
++         * (bcm2838_genet_rdma() only splits frames larger than the ring's
++         * whole RING_BUF_SIZE register).  With none free, return 0: the
++         * net layer keeps the frame queued (and holds off further ones)
++         * until the CONS_INDEX write that frees a descriptor flushes it.
++         */
++        if (bcm2838_genet_rdma_ring_active(s, ring_index) &&
++            bcm2838_genet_rdma_free_descs(s, ring_index) == 0) {
++            return 0;
+         }
+ 
+         if (size <= MAX_PACKET_SIZE) {
+-- 
+2.47.3
+

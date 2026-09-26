@@ -109,6 +109,86 @@ wget -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || 
     wget --no-check-certificate -O /dev/null https://www.google.com 2>&1 && echo "HTTPS fetch: SUCCESS" || echo "HTTPS fetch: FAILED"
 }
 
+# Bulk transfer test: repeated 1 MB request/response chunks over ONE
+# long-lived TCP connection to the harness's bulk server (10.0.2.2:9876
+# via slirp).  Regression check for rpi-qemu issue #12: a bogus GENET
+# RX status-block checksum forces the kernel to software-validate every
+# packet (killing GRO and ~7x throughput) and long-lived bulk flows
+# degrade.  Skipped gracefully (FAILED) when no server is listening,
+# e.g. under the socket-networking tests.
+echo "=== Bulk transfer test (5 x 1 MB, one TCP connection) ==="
+BULK_MD5="344dfba45d117fdd78f91b9284fd94aa"
+# Ignore SIGPIPE so a missing/dead bulk server (e.g. under the socket
+# tests) yields "Bulk transfer: FAILED" instead of killing this script.
+trap "" PIPE
+mkfifo /tmp/bulk_req /tmp/bulk_data
+nc -w 10 10.0.2.2 9876 < /tmp/bulk_req > /tmp/bulk_data &
+exec 7> /tmp/bulk_req
+exec 8< /tmp/bulk_data
+bulk_ok=1
+i=1
+while [ $i -le 5 ]; do
+    t0=$(cut -d' ' -f1 /proc/uptime)
+    echo GET >&7
+    sum=$(timeout 90 sh -c 'head -c 1048576 <&8 | md5sum' 8<&8 | cut -d' ' -f1)
+    t1=$(cut -d' ' -f1 /proc/uptime)
+    echo "Bulk chunk $i: start=$t0 end=$t1 md5=$sum"
+    [ "$sum" = "$BULK_MD5" ] || bulk_ok=0
+    i=$((i+1))
+done
+exec 7>&-
+exec 8<&-
+if [ "$bulk_ok" = "1" ]; then
+    echo "Bulk transfer: SUCCESS"
+else
+    echo "Bulk transfer: FAILED"
+fi
+
+# RX checksum offload sanity: the GENET RSB must carry a checksum the
+# kernel agrees with; "hw csum failure" in dmesg means the emulated
+# checksum is wrong (netdev_rx_csum_fault, logged once per boot).
+echo "=== RX checksum offload check ==="
+if dmesg | grep -q "hw csum failure"; then
+    echo "RX csum: HW-FAULT"
+else
+    echo "RX csum: CLEAN"
+fi
+
+# RX ring overflow test, run only when the harness asks for it with
+# rxburst=<N> on the kernel command line (run-rpi-socket-network-test.py).
+# On "RX burst: READY" the harness's frame-level peer writes N minimum-size
+# UDP datagrams to a closed port in one burst -- far more than the GENET RX
+# ring holds, delivered while the guest cannot consume any.  Every datagram
+# the NIC delivers intact bumps Udp NoPorts (not capped by socket buffers),
+# so a lossless RX path yields a delta of exactly N; a device that laps the
+# ring hands the driver stale/empty descriptors instead.
+RXBURST=$(sed -n 's/.*rxburst=\\([0-9]*\\).*/\\1/p' /proc/cmdline)
+if [ -n "$RXBURST" ]; then
+    echo "=== RX burst test ($RXBURST datagrams) ==="
+    noports() { awk '/^Udp: [0-9]/ { print $3 }' /proc/net/snmp; }
+    ifstat() { cat /sys/class/net/eth0/statistics/$1; }
+    np0=$(noports); rxp0=$(ifstat rx_packets); rxe0=$(ifstat rx_errors)
+    echo "RX burst: READY"
+    got=0
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 1
+        got=$(( $(noports) - np0 ))
+        [ "$got" -ge "$RXBURST" ] && break
+        i=$((i+1))
+    done
+    sleep 2
+    got=$(( $(noports) - np0 ))
+    echo "RX burst: noports=$got expected=$RXBURST" \\
+         "rx_packets=$(( $(ifstat rx_packets) - rxp0 ))" \\
+         "rx_errors=$(( $(ifstat rx_errors) - rxe0 ))"
+    if [ "$got" = "$RXBURST" ]; then
+        echo "RX burst: SUCCESS"
+    else
+        echo "RX burst: FAILED"
+    fi
+fi
+
 # Show dmesg for GENET
 echo "=== dmesg genet ==="
 dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5
