@@ -3,6 +3,9 @@ name: Build QEMU RPi Packages
 on:
   push:
     branches: [main]
+  # Build and boot-test every pull request; the publish/release jobs are
+  # gated on refs/heads/main, so PR runs never publish anything.
+  pull_request:
   workflow_dispatch:
 
 # contents: write for the GitHub Release. Only the publish job gets Pages
@@ -10,8 +13,10 @@ on:
 permissions:
   contents: write
 
+# Per ref, so a PR push never cancels an in-flight main build (or its
+# publish), and vice versa.
 concurrency:
-  group: build-qemu-packages
+  group: build-qemu-packages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -204,11 +209,20 @@ jobs:
           path: tmp/pxeboot-output/
           retention-days: 90
 
+  boot-test:
+    # Boot-test the packages and PXE firmware this run just built, with this
+    # run's test scripts -- before anything is published.
+    name: Boot test
+    needs: [build-debs, build-pxeboot]
+    uses: ./.github/workflows/rpi-boot-test.yml
+    with:
+      qemu-source: artifact
+
   stage-apt:
     # Gather this run's .debs (plus the pxeboot firmware deb, built here) into
     # the artifact the shared publish workflow indexes: debs-<suite>-<arch>.
     name: Stage APT packages
-    needs: [build-debs, build-pxeboot]
+    needs: [build-debs, build-pxeboot, boot-test]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
@@ -287,7 +301,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-debs, build-static, build-pxeboot]
+    needs: [build-debs, build-static, build-pxeboot, boot-test]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
