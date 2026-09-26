@@ -154,6 +154,41 @@ else
     echo "RX csum: CLEAN"
 fi
 
+# RX ring overflow test, run only when the harness asks for it with
+# rxburst=<N> on the kernel command line (run-rpi-socket-network-test.py).
+# On "RX burst: READY" the harness's frame-level peer writes N minimum-size
+# UDP datagrams to a closed port in one burst -- far more than the GENET RX
+# ring holds, delivered while the guest cannot consume any.  Every datagram
+# the NIC delivers intact bumps Udp NoPorts (not capped by socket buffers),
+# so a lossless RX path yields a delta of exactly N; a device that laps the
+# ring hands the driver stale/empty descriptors instead.
+RXBURST=$(sed -n 's/.*rxburst=\\([0-9]*\\).*/\\1/p' /proc/cmdline)
+if [ -n "$RXBURST" ]; then
+    echo "=== RX burst test ($RXBURST datagrams) ==="
+    noports() { awk '/^Udp: [0-9]/ { print $3 }' /proc/net/snmp; }
+    ifstat() { cat /sys/class/net/eth0/statistics/$1; }
+    np0=$(noports); rxp0=$(ifstat rx_packets); rxe0=$(ifstat rx_errors)
+    echo "RX burst: READY"
+    got=0
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 1
+        got=$(( $(noports) - np0 ))
+        [ "$got" -ge "$RXBURST" ] && break
+        i=$((i+1))
+    done
+    sleep 2
+    got=$(( $(noports) - np0 ))
+    echo "RX burst: noports=$got expected=$RXBURST" \\
+         "rx_packets=$(( $(ifstat rx_packets) - rxp0 ))" \\
+         "rx_errors=$(( $(ifstat rx_errors) - rxe0 ))"
+    if [ "$got" = "$RXBURST" ]; then
+        echo "RX burst: SUCCESS"
+    else
+        echo "RX burst: FAILED"
+    fi
+fi
+
 # Show dmesg for GENET
 echo "=== dmesg genet ==="
 dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5

@@ -67,6 +67,15 @@ INITRD_ADDR = 0x12000000   # 288 MB
 # which doesn't match the RPi kernel's "dwc_otg" driver name).
 BOOTARGS = "earlycon=pl011,mmio32,0xfe201000 console=ttyAMA0 loglevel=7 rdinit=/init"
 
+# RX ring overflow test: the peer sends this many minimum-size UDP frames
+# in one write once the guest prints "RX burst: READY".  QEMU's socket
+# backend delivers every complete frame of a read (up to ~68 KB) in one
+# main-loop pass, so ~1000 x 64-byte wire frames reach GENET while the
+# guest can't consume any -- several times the 256-descriptor RX ring.
+# The init script only runs the test when rxburst=<N> is on the cmdline.
+RX_BURST = 1000
+BOOTARGS += f" rxburst={RX_BURST}"
+
 
 # ---------------------------------------------------------------------------
 # SocketNetPeer: minimal DHCP/TFTP/ARP/ICMP server over QEMU socket protocol
@@ -112,6 +121,7 @@ class SocketNetPeer:
         self.tftp_bytes_sent = 0
         self.arp_replies = 0
         self.icmp_replies = 0
+        self.burst_sent = 0
         self._lock = threading.Lock()
 
     def start(self, port=0):
@@ -190,6 +200,26 @@ class SocketNetPeer:
                 self.conn.sendall(struct.pack(">I", len(frame)) + frame)
             except (ConnectionError, OSError):
                 pass
+
+    def send_udp_burst(self, count, dst_port=9):
+        """Send `count` minimum-size UDP frames to the client in ONE write.
+
+        Each frame is exactly 60 bytes (14 Ethernet + 20 IPv4 + 8 UDP +
+        18 payload), so the burst is 64 bytes per frame on the wire and
+        QEMU's socket backend can take the whole burst in a single read.
+        dst_port 9 (discard) is closed in the guest, so every intact
+        datagram is counted in the guest's Udp NoPorts.
+        """
+        burst = bytearray()
+        for seq in range(count):
+            payload = struct.pack(">I", seq) + bytes(14)
+            frame = self._build_udp_frame(
+                self.client_mac, self.CLIENT_IP, 40000, dst_port, payload)
+            assert len(frame) == 60
+            burst += struct.pack(">I", len(frame)) + frame
+        with self._lock:
+            self.conn.sendall(bytes(burst))
+        self.burst_sent = count
 
     # -- Frame dispatch -----------------------------------------------------
 
@@ -709,6 +739,11 @@ def run_test():
 
         # === Phase 4: Wait for Linux ===
         print("--- Phase 4: Waiting for Linux boot + network tests ---")
+        if wait_for("RX burst: READY", timeout=240, label="RX burst ready"):
+            print(f"  Sending RX burst: {RX_BURST} UDP frames in one write")
+            peer.send_udp_burst(RX_BURST)
+        else:
+            print("  TIMEOUT waiting for RX burst READY")
         # The initramfs bulk-transfer check adds ~15 s of connect
         # timeouts here (the frame-level peer has no TCP bulk server).
         if not wait_for("Network test complete", timeout=240, label="network tests"):
@@ -742,6 +777,7 @@ def run_test():
         ("USB keyboard",        "QEMU USB Keyboard"),
         ("Link up",             "Link is Up"),
         ("DHCP lease",          "lease of"),
+        ("RX burst (ring overflow)", "RX burst: SUCCESS"),
     ]
 
     # Optional checks (timing-dependent or peer doesn't route internet)
@@ -775,7 +811,8 @@ def run_test():
           f"{peer.tftp_files_served} files served, "
           f"{peer.tftp_bytes_sent / 1024 / 1024:.1f} MB transferred")
     print(f"              {peer.arp_replies} ARP replies, "
-          f"{peer.icmp_replies} ICMP echo replies")
+          f"{peer.icmp_replies} ICMP echo replies, "
+          f"{peer.burst_sent} RX burst frames")
 
     if stderr_text.strip():
         print()
@@ -791,7 +828,7 @@ def run_test():
                     "Starting kernel", "Booting Linux",
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
                     "Link is Up", "lease of",
-                    "64 bytes from", "HTTPS fetch",
+                    "64 bytes from", "HTTPS fetch", "RX burst:",
                     "Network test complete"]:
             if kw in s:
                 print(f"  > {s[:130]}")
