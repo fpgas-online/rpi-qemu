@@ -1,9 +1,21 @@
 name: RPi QEMU Boot Test
 
 on:
+  # Called by build-qemu-packages.yml with qemu-source: artifact to boot-test
+  # the packages that run just built -- on pull requests as well as main --
+  # before anything is published.
+  workflow_call:
+    inputs:
+      qemu-source:
+        description: "'artifact' = this run's qemu-rpi-debs; 'apt' = published APT repo"
+        type: string
+        default: artifact
+  # Smoke test of the published APT package after a main build has
+  # published it (the build itself has already boot-tested its artifacts).
   workflow_run:
     workflows: ["Build QEMU RPi Packages"]
     types: [completed]
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -11,8 +23,14 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     timeout-minutes: 45
-    # Only run if the package build succeeded
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # Called runs only exist once the build jobs they need have succeeded;
+    # workflow_run fires on any build conclusion, so check it succeeded.
+    if: >-
+      inputs.qemu-source == 'artifact' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    env:
+      QEMU_SOURCE: ${{ inputs.qemu-source || 'apt' }}
 
     steps:
       - name: Install base tools
@@ -23,7 +41,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download QEMU packages built by this run
+        if: env.QEMU_SOURCE == 'artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-debs
+          # Outside tmp/, which is uploaded wholesale on failure.
+          path: ci-debs/
+
+      - name: Install QEMU from this run's packages
+        if: env.QEMU_SOURCE == 'artifact'
+        run: |
+          ls -lh ci-debs/
+          apt-get install -y \
+            ./ci-debs/qemu-rpi-system-arm_*_amd64.deb \
+            ./ci-debs/qemu-rpi-system-data_*_all.deb
+
+          echo "=== Installed ==="
+          dpkg-query -W qemu-rpi-system-arm qemu-rpi-system-data
+          which qemu-rpi-system-aarch64
+          qemu-rpi-system-aarch64 --version
+
       - name: Install QEMU from APT repo
+        if: env.QEMU_SOURCE == 'apt'
         run: |
           echo "=== Adding QEMU RPi APT repository ==="
           install -d -m0755 /etc/apt/keyrings
@@ -118,7 +158,14 @@ jobs:
           echo "=== Running socket networking test with peer ==="
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-socket-network-test.py
 
-      - name: Download PXE boot firmware
+      - name: Download PXE boot firmware (this run)
+        if: env.QEMU_SOURCE == 'artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-pxeboot
+          path: tmp/pxeboot-firmware/
+
+      - name: Download PXE boot firmware (triggering build)
         if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
@@ -128,7 +175,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run PXE boot test (cfgtxt + gzip decompression)
-        if: github.event_name == 'workflow_run'
+        if: env.QEMU_SOURCE == 'artifact' || github.event_name == 'workflow_run'
         run: |
           echo "=== Running PXE boot test (VideoCore emulation) ==="
           ls -lh tmp/pxeboot-firmware/
@@ -137,7 +184,7 @@ jobs:
             python3 run-rpi-pxeboot-test.py
 
       - name: Run PXE boot test from a flat TFTP root (prefix fallback)
-        if: github.event_name == 'workflow_run'
+        if: env.QEMU_SOURCE == 'artifact' || github.event_name == 'workflow_run'
         run: |
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) \
           PXEBOOT_OVERRIDE=tmp/pxeboot-firmware/rpi4b-pxeboot.bin \
@@ -147,6 +194,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: boot-test-log
+          name: boot-test-log-${{ env.QEMU_SOURCE }}
           path: tmp/
           retention-days: 7
