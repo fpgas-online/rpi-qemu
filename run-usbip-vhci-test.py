@@ -206,10 +206,13 @@ def run(tool, check):
                                   "usbfs Bulk-Only INQUIRY"))
             data, status = bot.command(
                 struct.pack(">BBIBHB", 0x28, 0, 0, 0, 128, 0), 128 * 512)
+            bad = [i for i in range(len(data) // 512)
+                   if data[i * 512:i * 512 + 4] != i.to_bytes(4, "little")]
             results.append(report(
-                status == 0 and all(data[i * 512:i * 512 + 4] ==
-                                    i.to_bytes(4, "little") for i in range(128)),
-                "usbfs Bulk-Only READ(10) of 64 KiB matches the image"))
+                status == 0 and len(data) == 128 * 512 and not bad,
+                f"usbfs Bulk-Only READ(10) of 64 KiB matches the image "
+                f"(got {len(data)} bytes, CSW status {status}, "
+                f"mismatched blocks {bad[:8]}, first {data[:8].hex()})"))
         finally:
             bot.close()
 
