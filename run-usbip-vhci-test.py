@@ -97,12 +97,21 @@ class UsbfsBulkOnly:
         cbw = struct.pack("<IIIBBB16s", 0x43425355, self.tag, data_in_len,
                           0x80, 0, len(cdb), bytes(cdb).ljust(16, b"\0"))
         self._bulk(self.ep_out, cbw)
-        data = self._bulk(self.ep_in, bytes(data_in_len))
+        data = self._bulk(self.ep_in, bytes(data_in_len)) if data_in_len else b""
         csw = self._bulk(self.ep_in, bytes(13))
         sig, tag, _residue, status = struct.unpack("<IIIB", csw)
         if sig != 0x53425355 or tag != self.tag:
             raise RuntimeError(f"bad CSW {csw.hex()}")
         return data, status
+
+    def ready(self):
+        """TEST UNIT READY, clearing the power-on unit attention with
+        REQUEST SENSE as a host does -- at most three rounds."""
+        for _ in range(3):
+            if self.command(bytes(6), 0)[1] == 0:
+                return True
+            self.command(bytes([0x03, 0, 0, 0, 18, 0]), 18)
+        return False
 
 
 # The imported device in the host kernel
@@ -204,6 +213,7 @@ def run(tool, check):
             inq, status = bot.command(bytes([0x12, 0, 0, 0, 36, 0]), 36)
             results.append(report(status == 0 and inq[8:16] == b"QEMU    ",
                                   "usbfs Bulk-Only INQUIRY"))
+            results.append(report(bot.ready(), "usbfs Bulk-Only unit ready"))
             data, status = bot.command(
                 struct.pack(">BBIBHB", 0x28, 0, 0, 0, 128, 0), 128 * 512)
             bad = [i for i in range(len(data) // 512)
