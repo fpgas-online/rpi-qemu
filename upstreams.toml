@@ -1,0 +1,33 @@
+# Every project this repository fetches and patches, pinned. A pin bump is a
+# commit here, and so a new package version (docs/packaging.md in
+# mithro/apt-repo-action, "Set B": a patch series).
+#
+# Each section is one source package, built from packaging/debian/<name>/ by
+# ci/prepare-source.py and apt-repo-action's build-deb. `version` is the
+# upstream part of that package's version,
+# `<version>+fpgasonline.<X.Y.postN>[~deb<R>]`, recorded here so the build
+# needs no upstream history: for a git pin it is upstream's `describe` at the
+# commit, with `-rcN` as `~rcN` and the commit count as `.postN`.
+
+[qemu-rpi]
+# Debian's QEMU orig tarball. deb.debian.org drops a tarball once Debian
+# moves on, so snapshot.debian.org, which addresses every file by its SHA-1,
+# is the fallback.
+version = "11.1.0"
+url = "https://deb.debian.org/debian/pool/main/q/qemu/qemu_11.1.0+ds.orig.tar.xz"
+sha1 = "320b6a3da46bfb0f79072d4f9ba635fd8d1a87ee"
+sha256 = "1bda0f7c9298e24e9b40bebb257e61d6e017d5dca425caa5e385dea4b43ce9fc"
+patches = "ci/qemu-patches"
+# The static binary on the GitHub Release is built from upstream's git, at
+# this tag, since the Debian +ds tarball lacks subprojects/slirp.
+git = "https://gitlab.com/qemu-project/qemu.git"
+tag = "v11.1.0"
+
+[qemu-rpi-pxeboot]
+git = "https://github.com/u-boot/u-boot.git"
+commit = "47e064f13171f15817aa1b22b04e309964b15c2c"
+describe = "v2026.04-rc5-25-g47e064f13"
+version = "2026.04~rc5.post25"
+patches = "ci/uboot-patches"
+# Copied into the tree before the build: repository path = tree path.
+files = { "ci/rpi_4_qemu_pxeboot_defconfig" = "configs/rpi_4_qemu_pxeboot_defconfig", "ci/vc-boot-pi4b.env" = "board/raspberrypi/rpi/pxeboot.env" }
