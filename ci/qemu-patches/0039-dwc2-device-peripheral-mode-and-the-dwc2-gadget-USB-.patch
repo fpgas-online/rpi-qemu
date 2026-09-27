@@ -1,4 +1,4 @@
-From 5959534a3e291082ebd8b904af3ccc0ea77fa641 Mon Sep 17 00:00:00 2001
+From cb17b8010158ae6754cc5b40b2d6935e047036b8 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1040 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1052 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1219 insertions(+), 25 deletions(-)
+ 5 files changed, 1231 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..9c922de
+index 0000000..965ff3b
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1040 @@
+@@ -0,0 +1,1052 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -945,7 +945,19 @@ index 0000000..9c922de
 +        moved = dwc2_ep_in_packets(s, n, buf, p->iov.size, &done, &babble);
 +        usb_packet_copy(p, buf, moved);
 +        p->status = moved || done ? USB_RET_SUCCESS : USB_RET_NAK;
++        if (p->status == USB_RET_NAK) {
++            /*
++             * An IN token with nothing armed: the core answers with a
++             * zero-length packet and flags NAK -- the driver starts its
++             * isochronous IN stream from this.
++             */
++            s->iepreg[n][DEP_INT] |= DXEPINT_NAKINTRPT;
++        }
 +    } else {
++        if (!(s->oepreg[n][DEP_CTL] & DXEPCTL_EPENA)) {
++            /* the driver starts its ISO OUT stream from this */
++            s->oepreg[n][DEP_INT] |= DXEPINT_OUTTKNEPDIS;
++        }
 +        iov_to_buf(p->iov.iov, p->iov.niov, 0, buf, p->iov.size);
 +        moved = dwc2_ep_out_packets(s, n, buf, p->iov.size, 0, &done);
 +        p->actual_length = moved;
