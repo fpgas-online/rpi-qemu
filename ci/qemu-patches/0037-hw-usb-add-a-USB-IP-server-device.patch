@@ -1,4 +1,4 @@
-From 5bad2843678dd781d78e1d9929bd2d9d09e4d51e Mon Sep 17 00:00:00 2001
+From 1b9bd4d076d59dccad5c568f0ef7a784ce96b79b Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 00:24:03 +0930
 Subject: [PATCH] hw/usb: add a USB/IP server device
@@ -54,10 +54,10 @@ Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
  hw/usb/bus.c                  |    3 +-
  hw/usb/meson.build            |    1 +
  hw/usb/trace-events           |    8 +
- hw/usb/usbip-server.c         | 1061 +++++++++++++++++++++++++++++++++
+ hw/usb/usbip-server.c         | 1082 +++++++++++++++++++++++++++++++++
  include/hw/usb/usb.h          |    2 +
  include/hw/usb/usbip-server.h |   14 +
- 9 files changed, 1098 insertions(+), 1 deletion(-)
+ 9 files changed, 1119 insertions(+), 1 deletion(-)
  create mode 100644 hw/usb/usbip-server.c
  create mode 100644 include/hw/usb/usbip-server.h
 
@@ -159,10 +159,10 @@ index 0d4318d..1de3a6a 100644
 +usbip_server_enumerate(int step, int status) "step=%d status=%d"
 diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
 new file mode 100644
-index 0000000..3f462ec
+index 0000000..5a5b4d8
 --- /dev/null
 +++ b/hw/usb/usbip-server.c
-@@ -0,0 +1,1061 @@
+@@ -0,0 +1,1082 @@
 +/*
 + * USB/IP server: exports the QEMU USB device on its port over USB/IP
 + *
@@ -493,11 +493,27 @@ index 0000000..3f462ec
 +        usb_handle_packet(dev, &u->packet);
 +        d->actual_length = 0;
 +        d->status = 0;
-+        if (u->packet.status == USB_RET_SUCCESS) {
++        if (u->packet.status == USB_RET_ASYNC) {
++            /* ISO never waits: take the packet back */
++            usb_cancel_packet(&u->packet);
++            d->status = -USBIP_EPROTO;
++        } else if (u->packet.status == USB_RET_SUCCESS) {
 +            d->actual_length = u->packet.actual_length;
 +        } else if (u->packet.status != USB_RET_NAK) {
 +            d->status = usbip_urb_status(u);
 +        }
++    }
++    usbip_urb_complete(s, u);
++}
++
++/* An ISO URB for an endpoint that is not isochronous: every packet stalls. */
++static void usbip_urb_iso_stall(USBIPServerState *s, USBIPURB *u)
++{
++    int i;
++
++    for (i = 0; i < u->number_of_packets; i++) {
++        u->iso[i].actual_length = 0;
++        u->iso[i].status = -USBIP_EPIPE;
 +    }
 +    usbip_urb_complete(s, u);
 +}
@@ -510,7 +526,12 @@ index 0000000..3f462ec
 +    int pid;
 +
 +    if (u->number_of_packets) {
-+        usbip_urb_iso(s, u);
++        ep = usb_ep_get(dev, u->in ? USB_TOKEN_IN : USB_TOKEN_OUT, u->epnum);
++        if (u->epnum == 0 || ep->type != USB_ENDPOINT_XFER_ISOC) {
++            usbip_urb_iso_stall(s, u);
++        } else {
++            usbip_urb_iso(s, u);
++        }
 +        return true;
 +    }
 +    if (u->epnum == 0) {
