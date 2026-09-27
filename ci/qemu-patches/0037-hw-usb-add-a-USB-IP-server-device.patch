@@ -1,0 +1,1262 @@
+From 5bad2843678dd781d78e1d9929bd2d9d09e4d51e Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 28 Sep 2026 00:24:03 +0930
+Subject: [PATCH] hw/usb: add a USB/IP server device
+
+usbip-server exports the QEMU USB device on its port over USB/IP
+(https://docs.kernel.org/usb/usbip_protocol.html), the protocol Linux's
+vhci-hcd ("usbip attach") and other USB/IP clients speak:
+
+  -chardev socket,id=usbipchr,host=127.0.0.1,port=3240,server=on,wait=off
+  -device usbip-server,id=usbip0,chardev=usbipchr
+  -device usb-storage,bus=usbip0.0,drive=disk0
+
+It is a sysbus device without MMIO or IRQ owning a one-port USB bus,
+allowed as a dynamic sysbus device on the raspi machines and -M none
+(a bus-less device would do, but -device ...,bus= only finds buses in
+the sysbus tree).  The transport is a chardev, as for usbredir.
+
+- OP_REQ_DEVLIST/OP_REQ_IMPORT answer with the device record.  Because
+  vhci-hcd never sends SET_ADDRESS or a port reset, the server
+  enumerates the device first: port reset, SET_ADDRESS, device and
+  configuration descriptors (with real control transfers, so a device
+  answering asynchronously works too).
+- CMD_SUBMIT becomes a USBPacket: control (setup in p->parameter),
+  bulk, interrupt, and isochronous (one packet per ISO descriptor; an
+  URB is ISO when number_of_packets >= 1 -- vhci sends 0 otherwise, the
+  protocol document 0xffffffff).  Completions may be synchronous,
+  asynchronous (many URBs in flight, per-endpoint order), or NAKed: a
+  NAKed URB waits, retried on the device's wakeup and every millisecond.
+- CMD_UNLINK cancels: -ECONNRESET if the URB was pending (no RET_SUBMIT
+  follows), 0 if it had completed.  Status values are Linux errno
+  numbers on every host.
+- One client at a time.  A malformed message closes that connection
+  only; device unplug and machine reset close it too, which is how a
+  USB/IP exporter reports a removed device (as Linux's usbip-host does).
+
+USBBus gains no_auto_hub: usb_claim_port() chains a usb-hub onto a bus
+when a device takes its last free port, which on a one-port bus would
+export the hub instead of the device.
+
+Tested with a Python USB/IP client against usb-storage (descriptors,
+BOT INQUIRY/READ CAPACITY/READ(10) of 64 KiB/WRITE(10) persisted to the
+image), usb-kbd (interrupt IN held until a key press, unlink of pending
+and completed URBs) and usb-audio (ISO OUT per-packet status, stalls on
+a disabled stream), plus reconnection, malformed input, device_del and
+system_reset.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
+---
+ hw/arm/raspi.c                |    3 +
+ hw/core/null-machine.c        |    2 +
+ hw/usb/Kconfig                |    5 +
+ hw/usb/bus.c                  |    3 +-
+ hw/usb/meson.build            |    1 +
+ hw/usb/trace-events           |    8 +
+ hw/usb/usbip-server.c         | 1061 +++++++++++++++++++++++++++++++++
+ include/hw/usb/usb.h          |    2 +
+ include/hw/usb/usbip-server.h |   14 +
+ 9 files changed, 1098 insertions(+), 1 deletion(-)
+ create mode 100644 hw/usb/usbip-server.c
+ create mode 100644 include/hw/usb/usbip-server.h
+
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index a9cca07..09c30c3 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -21,6 +21,7 @@
+ #include "hw/arm/bcm2836.h"
+ #include "hw/arm/bcm2838.h"
+ #include "hw/arm/raspi_platform.h"
++#include "hw/usb/usbip-server.h"
+ #include "hw/core/registerfields.h"
+ #include "qemu/error-report.h"
+ #include "hw/core/boards.h"
+@@ -571,6 +572,8 @@ void raspi_machine_class_common_init(MachineClass *mc,
+     mc->default_cpus = mc->min_cpus = mc->max_cpus = cores_count(board_rev);
+     mc->default_ram_size = board_ram_size(board_rev);
+     mc->default_ram_id = "ram";
++    /* export a USB device (e.g. the OTG port's gadget) over USB/IP */
++    machine_class_allow_dynamic_sysbus_dev(mc, TYPE_USBIP_SERVER);
+ };
+ 
+ static void raspi_machine_class_init(MachineClass *mc,
+diff --git a/hw/core/null-machine.c b/hw/core/null-machine.c
+index f132a7b..684b490 100644
+--- a/hw/core/null-machine.c
++++ b/hw/core/null-machine.c
+@@ -16,6 +16,7 @@
+ #include "hw/core/boards.h"
+ #include "system/address-spaces.h"
+ #include "hw/core/cpu.h"
++#include "hw/usb/usbip-server.h"
+ #include "hw/arm/machines-qom.h"
+ #include "hw/riscv/machines-qom.h"
+ 
+@@ -55,6 +56,7 @@ static void machine_none_machine_init(MachineClass *mc)
+     mc->no_parallel = 1;
+     mc->no_floppy = 1;
+     mc->no_cdrom = 1;
++    machine_class_allow_dynamic_sysbus_dev(mc, TYPE_USBIP_SERVER);
+ }
+ 
+ DEFINE_MACHINE_WITH_INTERFACES("none", machine_none_machine_init,
+diff --git a/hw/usb/Kconfig b/hw/usb/Kconfig
+index de95686..e626bc5 100644
+--- a/hw/usb/Kconfig
++++ b/hw/usb/Kconfig
+@@ -146,3 +146,8 @@ config XLNX_USB_SUBSYS
+ config USB_CHIPIDEA
+     bool
+     select USB_EHCI_SYSBUS
++
++config USBIP_SERVER
++    bool
++    default y
++    depends on USB
+diff --git a/hw/usb/bus.c b/hw/usb/bus.c
+index 3b6fbd4..ea7c2fc 100644
+--- a/hw/usb/bus.c
++++ b/hw/usb/bus.c
+@@ -408,7 +408,8 @@ void usb_claim_port(USBDevice *dev, Error **errp)
+             return;
+         }
+     } else {
+-        if (bus->nfree == 1 && strcmp(object_get_typename(OBJECT(dev)), "usb-hub") != 0) {
++        if (bus->nfree == 1 && !bus->no_auto_hub &&
++            strcmp(object_get_typename(OBJECT(dev)), "usb-hub") != 0) {
+             /* Create a new hub and chain it on */
+             hub = USB_DEVICE(qdev_try_new("usb-hub"));
+             if (hub) {
+diff --git a/hw/usb/meson.build b/hw/usb/meson.build
+index ba55c28..2cce3f3 100644
+--- a/hw/usb/meson.build
++++ b/hw/usb/meson.build
+@@ -26,6 +26,7 @@ system_ss.add(when: 'CONFIG_USB_XHCI_SYSBUS', if_true: files('hcd-xhci-sysbus.c'
+ system_ss.add(when: 'CONFIG_USB_XHCI_NEC', if_true: files('hcd-xhci-nec.c'))
+ system_ss.add(when: 'CONFIG_USB_DWC2', if_true: files('hcd-dwc2.c'))
+ system_ss.add(when: 'CONFIG_USB_DWC3', if_true: files('hcd-dwc3.c'))
++system_ss.add(when: 'CONFIG_USBIP_SERVER', if_true: files('usbip-server.c'))
+ system_ss.add(when: 'CONFIG_USB_CHIPIDEA', if_true: files('chipidea.c'))
+ 
+ system_ss.add(when: 'CONFIG_IMX_USBPHY', if_true: files('imx-usb-phy.c'))
+diff --git a/hw/usb/trace-events b/hw/usb/trace-events
+index 0d4318d..1de3a6a 100644
+--- a/hw/usb/trace-events
++++ b/hw/usb/trace-events
+@@ -377,3 +377,11 @@ canokey_handle_data_out(uint8_t ep_out, uint32_t out_len) "ep %d len %d"
+ canokey_handle_data_in(uint8_t ep_in, uint32_t in_len) "ep %d len %d"
+ canokey_realize(void)
+ canokey_unrealize(void)
++
++# usbip-server.c
++usbip_server_connection(const char *event) "%s"
++usbip_server_op(uint16_t code) "code=0x%04x"
++usbip_server_submit(uint32_t seqnum, uint8_t ep, int in, uint32_t len, int32_t npackets) "seqnum=%u ep=%u in=%d len=%u iso_packets=%d"
++usbip_server_complete(uint32_t seqnum, int32_t status, uint32_t actual) "seqnum=%u status=%d actual=%u"
++usbip_server_unlink(uint32_t seqnum, uint32_t victim, int32_t status) "seqnum=%u victim=%u status=%d"
++usbip_server_enumerate(int step, int status) "step=%d status=%d"
+diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
+new file mode 100644
+index 0000000..3f462ec
+--- /dev/null
++++ b/hw/usb/usbip-server.c
+@@ -0,0 +1,1061 @@
++/*
++ * USB/IP server: exports the QEMU USB device on its port over USB/IP
++ *
++ * Protocol: https://docs.kernel.org/usb/usbip_protocol.html
++ *
++ * The server is a sysbus device (no MMIO, no IRQ) owning a one-port USB
++ * bus.  A client (Linux's vhci-hcd via "usbip attach", or any USB/IP
++ * client) connects to its chardev, lists or imports the device, then
++ * submits URBs, which become USBPackets on the device.
++ *
++ * Copyright (c) 2026 Tim 'mithro' Ansell <me@mith.ro>
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "qemu/bswap.h"
++#include "qemu/cutils.h"
++#include "qemu/error-report.h"
++#include "qemu/main-loop.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "chardev/char-fe.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/core/qdev-properties-system.h"
++#include "hw/core/sysbus.h"
++#include "hw/usb/usb.h"
++#include "hw/usb/usbip-server.h"
++#include "trace.h"
++
++OBJECT_DECLARE_SIMPLE_TYPE(USBIPServerState, USBIP_SERVER)
++
++#define USBIP_VERSION           0x0111
++#define USBIP_OP_REQ_DEVLIST    0x8005
++#define USBIP_OP_REP_DEVLIST    0x0005
++#define USBIP_OP_REQ_IMPORT     0x8003
++#define USBIP_OP_REP_IMPORT     0x0003
++#define USBIP_CMD_SUBMIT        1
++#define USBIP_CMD_UNLINK        2
++#define USBIP_RET_SUBMIT        3
++#define USBIP_RET_UNLINK        4
++#define USBIP_DIR_OUT           0
++#define USBIP_DIR_IN            1
++
++#define USBIP_OP_HDR_LEN        8
++#define USBIP_BUSID_LEN         32
++#define USBIP_HDR_LEN           0x30
++#define USBIP_DEV_REC_LEN       0x138
++#define USBIP_ISO_DESC_LEN      16
++#define USBIP_MAX_XFER          (16 * MiB)
++#define USBIP_MAX_ISO_PACKETS   1024
++
++#define USBIP_URB_SHORT_NOT_OK  0x0001
++
++/* The one exported device: bus 1, port 1, address 1. */
++#define USBIP_PATH              "/sys/devices/qemu/usbip/usb1/1-1"
++#define USBIP_BUSID             "1-1"
++#define USBIP_BUSNUM            1
++#define USBIP_DEVNUM            1
++
++/* Linux errno values: the wire carries these on every host OS. */
++#define USBIP_ENODEV            19
++#define USBIP_EPIPE             32
++#define USBIP_EPROTO            71
++#define USBIP_EOVERFLOW         75
++#define USBIP_ECONNRESET        104
++#define USBIP_EREMOTEIO         121
++
++/* Per-endpoint URB queues: key 0 is EP0, 1..15 OUT, 17..31 IN. */
++#define USBIP_NUM_KEYS          32
++
++typedef enum USBIPConn {
++    USBIP_CONN_NONE,            /* no client */
++    USBIP_CONN_OP,              /* connected, expecting OP_REQ_* */
++    USBIP_CONN_ENUMERATING,     /* enumerating the device to answer an op */
++    USBIP_CONN_ATTACHED,        /* imported: URB traffic */
++} USBIPConn;
++
++typedef struct USBIPIsoDesc {
++    uint32_t offset;
++    uint32_t length;
++    uint32_t actual_length;
++    int32_t status;
++} USBIPIsoDesc;
++
++typedef enum USBIPURBState {
++    USBIP_URB_WAITING,          /* NAKed, or queued behind a NAKed URB */
++    USBIP_URB_INFLIGHT,         /* the device holds it (USB_RET_ASYNC) */
++} USBIPURBState;
++
++typedef struct USBIPURB {
++    USBPacket packet;
++    uint32_t seqnum;
++    uint8_t epnum;
++    bool in;
++    bool internal;              /* the server's own enumeration request */
++    USBIPURBState state;
++    uint32_t flags;
++    int32_t start_frame;
++    int32_t number_of_packets;  /* >= 1 for isochronous URBs, else 0 */
++    uint8_t setup[8];
++    uint8_t *buf;
++    uint32_t len;
++    USBIPIsoDesc *iso;
++    QTAILQ_ENTRY(USBIPURB) next;
++} USBIPURB;
++
++struct USBIPServerState {
++    SysBusDevice parent_obj;
++
++    CharFrontend chr;
++    USBBus bus;
++    USBPort port;
++
++    USBIPConn conn;
++    bool parsing;
++    GByteArray *rx;
++    GByteArray *tx;
++    guint watch;
++    QTAILQ_HEAD(, USBIPURB) inflight;
++    QTAILQ_HEAD(, USBIPURB) waiting[USBIP_NUM_KEYS];
++    QEMUTimer *retry_timer;
++    QEMUBH *retry_bh;
++    bool port_resetting;
++
++    /* Self-enumeration: vhci-hcd never sends SET_ADDRESS or a reset. */
++    uint16_t enum_op;           /* the OP_REQ_* waiting for it, or 0 */
++    int enum_step;
++    bool enumerated;
++    uint8_t dev_desc[18];
++    uint8_t *cfg_desc;
++    uint16_t cfg_len;
++};
++
++static bool usbip_device_present(USBIPServerState *s)
++{
++    return s->port.dev && s->port.dev->attached;
++}
++
++/* Output */
++
++static void usbip_flush(USBIPServerState *s);
++
++static gboolean usbip_tx_ready(void *do_not_use, GIOCondition cond,
++                               void *opaque)
++{
++    USBIPServerState *s = opaque;
++
++    s->watch = 0;
++    usbip_flush(s);
++    return G_SOURCE_REMOVE;
++}
++
++static void usbip_flush(USBIPServerState *s)
++{
++    while (s->tx->len) {
++        int r = qemu_chr_fe_write(&s->chr, s->tx->data,
++                                  MIN(s->tx->len, 64 * KiB));
++        if (r <= 0) {
++            if (!s->watch) {
++                s->watch = qemu_chr_fe_add_watch(&s->chr, G_IO_OUT | G_IO_HUP,
++                                                 usbip_tx_ready, s);
++            }
++            return;
++        }
++        g_byte_array_remove_range(s->tx, 0, r);
++    }
++}
++
++static void usbip_send(USBIPServerState *s, const void *data, size_t len)
++{
++    if (s->conn == USBIP_CONN_NONE) {
++        return;
++    }
++    g_byte_array_append(s->tx, data, len);
++    usbip_flush(s);
++}
++
++static void usbip_send_op_header(USBIPServerState *s, uint16_t code,
++                                 uint32_t status)
++{
++    uint8_t h[USBIP_OP_HDR_LEN];
++
++    stw_be_p(h, USBIP_VERSION);
++    stw_be_p(h + 2, code);
++    stl_be_p(h + 4, status);
++    usbip_send(s, h, sizeof(h));
++}
++
++/* URBs */
++
++static USBIPURB *usbip_urb_new(uint32_t seqnum, uint32_t len)
++{
++    USBIPURB *u = g_new0(USBIPURB, 1);
++
++    u->seqnum = seqnum;
++    u->len = len;
++    u->buf = g_malloc0(MAX(len, 1));
++    usb_packet_init(&u->packet);
++    return u;
++}
++
++static void usbip_urb_free(USBIPURB *u)
++{
++    usb_packet_cleanup(&u->packet);
++    g_free(u->iso);
++    g_free(u->buf);
++    g_free(u);
++}
++
++/* EP0 is one queue in both directions, like QEMU's ep_ctl. */
++static unsigned usbip_urb_key(const USBIPURB *u)
++{
++    return u->epnum == 0 ? 0 : u->epnum + (u->in ? 16 : 0);
++}
++
++static int32_t usbip_urb_status(const USBIPURB *u)
++{
++    const USBPacket *p = &u->packet;
++
++    switch (p->status) {
++    case USB_RET_SUCCESS:
++        if ((u->flags & USBIP_URB_SHORT_NOT_OK) && u->in &&
++            p->actual_length < u->len) {
++            return -USBIP_EREMOTEIO;
++        }
++        return 0;
++    case USB_RET_STALL:
++        return -USBIP_EPIPE;
++    case USB_RET_BABBLE:
++        return -USBIP_EOVERFLOW;
++    case USB_RET_NODEV:
++        return -USBIP_ENODEV;
++    default:
++        return -USBIP_EPROTO;
++    }
++}
++
++static void usbip_send_ret_submit(USBIPServerState *s, USBIPURB *u)
++{
++    uint8_t h[USBIP_HDR_LEN] = { 0 };
++    uint32_t actual = 0, errors = 0;
++    int32_t status = 0;
++    int i;
++
++    if (u->number_of_packets) {
++        for (i = 0; i < u->number_of_packets; i++) {
++            actual += u->iso[i].actual_length;
++            errors += u->iso[i].status != 0;
++        }
++    } else {
++        actual = u->packet.actual_length;
++        status = usbip_urb_status(u);
++    }
++
++    trace_usbip_server_complete(u->seqnum, status, actual);
++    stl_be_p(h + 0x00, USBIP_RET_SUBMIT);
++    stl_be_p(h + 0x04, u->seqnum);
++    /* devid, direction and ep are 0 in replies */
++    stl_be_p(h + 0x14, status);
++    stl_be_p(h + 0x18, actual);
++    stl_be_p(h + 0x1c, u->number_of_packets ? u->start_frame : 0);
++    stl_be_p(h + 0x20, u->number_of_packets);
++    stl_be_p(h + 0x24, errors);
++    usbip_send(s, h, sizeof(h));
++
++    if (u->in) {
++        if (u->number_of_packets) {
++            /* ISO IN data goes without the gaps between packets */
++            for (i = 0; i < u->number_of_packets; i++) {
++                usbip_send(s, u->buf + u->iso[i].offset,
++                           u->iso[i].actual_length);
++            }
++        } else if (actual) {
++            usbip_send(s, u->buf, actual);
++        }
++    }
++    for (i = 0; i < u->number_of_packets; i++) {
++        uint8_t desc[USBIP_ISO_DESC_LEN];
++
++        stl_be_p(desc, u->iso[i].offset);
++        stl_be_p(desc + 4, u->iso[i].length);
++        stl_be_p(desc + 8, u->iso[i].actual_length);
++        stl_be_p(desc + 12, u->iso[i].status);
++        usbip_send(s, desc, sizeof(desc));
++    }
++}
++
++static void usbip_enum_done(USBIPServerState *s, USBIPURB *u);
++
++/* u is on no list here. */
++static void usbip_urb_complete(USBIPServerState *s, USBIPURB *u)
++{
++    if (u->internal) {
++        usbip_enum_done(s, u);
++        return;
++    }
++    usbip_send_ret_submit(s, u);
++    usbip_urb_free(u);
++}
++
++static void usbip_arm_retry(USBIPServerState *s)
++{
++    if (!timer_pending(s->retry_timer)) {
++        timer_mod(s->retry_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + SCALE_MS);
++    }
++}
++
++/*
++ * Isochronous URBs: one USBPacket per ISO packet, all synchronous (QEMU
++ * devices never answer ISO asynchronously).  A NAK is a frame without
++ * data: an empty packet.
++ */
++static void usbip_urb_iso(USBIPServerState *s, USBIPURB *u)
++{
++    USBDevice *dev = s->port.dev;
++    int pid = u->in ? USB_TOKEN_IN : USB_TOKEN_OUT;
++    USBEndpoint *ep = usb_ep_get(dev, pid, u->epnum);
++    int i;
++
++    for (i = 0; i < u->number_of_packets; i++) {
++        USBIPIsoDesc *d = &u->iso[i];
++
++        usb_packet_setup(&u->packet, pid, ep, 0, u->seqnum, false, false);
++        usb_packet_addbuf(&u->packet, u->buf + d->offset, d->length);
++        usb_handle_packet(dev, &u->packet);
++        d->actual_length = 0;
++        d->status = 0;
++        if (u->packet.status == USB_RET_SUCCESS) {
++            d->actual_length = u->packet.actual_length;
++        } else if (u->packet.status != USB_RET_NAK) {
++            d->status = usbip_urb_status(u);
++        }
++    }
++    usbip_urb_complete(s, u);
++}
++
++/* Hand an URB to the device.  Returns false if the device NAKed it. */
++static bool usbip_urb_try(USBIPServerState *s, USBIPURB *u)
++{
++    USBDevice *dev = s->port.dev;
++    USBEndpoint *ep;
++    int pid;
++
++    if (u->number_of_packets) {
++        usbip_urb_iso(s, u);
++        return true;
++    }
++    if (u->epnum == 0) {
++        pid = (u->setup[0] & USB_DIR_IN) ? USB_TOKEN_IN : USB_TOKEN_OUT;
++    } else {
++        pid = u->in ? USB_TOKEN_IN : USB_TOKEN_OUT;
++    }
++    ep = usb_ep_get(dev, pid, u->epnum);
++    usb_packet_setup(&u->packet, pid, ep, 0, u->seqnum,
++                     (u->flags & USBIP_URB_SHORT_NOT_OK) != 0, false);
++    usb_packet_addbuf(&u->packet, u->buf, u->len);
++    if (u->epnum == 0) {
++        u->packet.parameter = ldq_le_p(u->setup);
++    }
++    usb_handle_packet(dev, &u->packet);
++
++    switch (u->packet.status) {
++    case USB_RET_NAK:
++        return false;
++    case USB_RET_ASYNC:
++        u->state = USBIP_URB_INFLIGHT;
++        QTAILQ_INSERT_TAIL(&s->inflight, u, next);
++        return true;
++    default:
++        usbip_urb_complete(s, u);
++        return true;
++    }
++}
++
++/* Submit in order: behind any URB of the same endpoint still waiting. */
++static void usbip_urb_submit(USBIPServerState *s, USBIPURB *u)
++{
++    unsigned key = usbip_urb_key(u);
++
++    if (!QTAILQ_EMPTY(&s->waiting[key]) || !usbip_urb_try(s, u)) {
++        u->state = USBIP_URB_WAITING;
++        QTAILQ_INSERT_TAIL(&s->waiting[key], u, next);
++        usbip_arm_retry(s);
++    }
++}
++
++/* Take an URB off its list, cancelling it on the device if it holds it. */
++static void usbip_urb_unlink(USBIPServerState *s, USBIPURB *u)
++{
++    if (u->state == USBIP_URB_INFLIGHT) {
++        QTAILQ_REMOVE(&s->inflight, u, next);
++        usb_cancel_packet(&u->packet);
++    } else {
++        QTAILQ_REMOVE(&s->waiting[usbip_urb_key(u)], u, next);
++    }
++}
++
++static void usbip_cancel_all(USBIPServerState *s)
++{
++    USBIPURB *u;
++    int i;
++
++    while ((u = QTAILQ_FIRST(&s->inflight))) {
++        usbip_urb_unlink(s, u);
++        usbip_urb_free(u);
++    }
++    for (i = 0; i < USBIP_NUM_KEYS; i++) {
++        while ((u = QTAILQ_FIRST(&s->waiting[i]))) {
++            usbip_urb_unlink(s, u);
++            usbip_urb_free(u);
++        }
++    }
++}
++
++static void usbip_retry(USBIPServerState *s)
++{
++    int key;
++
++    for (key = 0; key < USBIP_NUM_KEYS; key++) {
++        USBIPURB *u;
++
++        while ((u = QTAILQ_FIRST(&s->waiting[key]))) {
++            QTAILQ_REMOVE(&s->waiting[key], u, next);
++            if (!usbip_urb_try(s, u)) {
++                QTAILQ_INSERT_HEAD(&s->waiting[key], u, next);
++                break;
++            }
++        }
++    }
++    for (key = 0; key < USBIP_NUM_KEYS; key++) {
++        if (!QTAILQ_EMPTY(&s->waiting[key])) {
++            usbip_arm_retry(s);
++            break;
++        }
++    }
++}
++
++static void usbip_retry_timer(void *opaque)
++{
++    usbip_retry(opaque);
++}
++
++static void usbip_retry_bh(void *opaque)
++{
++    usbip_retry(opaque);
++}
++
++/* Connection lifecycle */
++
++static void usbip_reset_connection(USBIPServerState *s)
++{
++    trace_usbip_server_connection("reset");
++    usbip_cancel_all(s);
++    timer_del(s->retry_timer);
++    s->conn = USBIP_CONN_NONE;
++    s->enum_op = 0;
++    s->enumerated = false;
++    g_byte_array_set_size(s->rx, 0);
++    g_byte_array_set_size(s->tx, 0);
++    if (s->watch) {
++        g_source_remove(s->watch);
++        s->watch = 0;
++    }
++}
++
++static void usbip_close_client(USBIPServerState *s)
++{
++    usbip_reset_connection(s);
++    qemu_chr_fe_disconnect(&s->chr);
++}
++
++static void G_GNUC_PRINTF(2, 3) usbip_drop_client(USBIPServerState *s,
++                                                  const char *fmt, ...)
++{
++    g_autofree char *msg = NULL;
++    va_list ap;
++
++    va_start(ap, fmt);
++    msg = g_strdup_vprintf(fmt, ap);
++    va_end(ap);
++    warn_report("usbip-server: %s; closing the client connection", msg);
++    usbip_close_client(s);
++}
++
++/* The device record of OP_REP_DEVLIST and OP_REP_IMPORT */
++
++static uint32_t usbip_speed(int speed)
++{
++    switch (speed) {
++    case USB_SPEED_LOW:
++        return 1;
++    case USB_SPEED_FULL:
++        return 2;
++    case USB_SPEED_HIGH:
++        return 3;
++    default:
++        g_assert_not_reached();     /* the port's speedmask stops at high */
++    }
++}
++
++/* Interface descriptors of the first configuration, alternate setting 0. */
++static int usbip_count_interfaces(USBIPServerState *s, bool send)
++{
++    int i, n = 0;
++
++    for (i = 0; i + 2 <= s->cfg_len && s->cfg_desc[i] >= 2;
++         i += s->cfg_desc[i]) {
++        const uint8_t *d = s->cfg_desc + i;
++
++        if (d[1] == USB_DT_INTERFACE && d[0] >= 9 && i + 9 <= s->cfg_len &&
++            d[3] == 0) {
++            uint8_t iface[4] = { d[5], d[6], d[7], 0 };
++
++            if (send) {
++                usbip_send(s, iface, sizeof(iface));
++            }
++            n++;
++        }
++    }
++    return n;
++}
++
++static void usbip_send_device_record(USBIPServerState *s,
++                                     bool with_interfaces)
++{
++    uint8_t rec[USBIP_DEV_REC_LEN] = { 0 };
++    const uint8_t *dd = s->dev_desc;
++
++    pstrcpy((char *)rec + 0x000, 256, USBIP_PATH);
++    pstrcpy((char *)rec + 0x100, USBIP_BUSID_LEN, USBIP_BUSID);
++    stl_be_p(rec + 0x120, USBIP_BUSNUM);
++    stl_be_p(rec + 0x124, USBIP_DEVNUM);
++    stl_be_p(rec + 0x128, usbip_speed(s->port.dev->speed));
++    stw_be_p(rec + 0x12c, lduw_le_p(dd + 8));       /* idVendor */
++    stw_be_p(rec + 0x12e, lduw_le_p(dd + 10));      /* idProduct */
++    stw_be_p(rec + 0x130, lduw_le_p(dd + 12));      /* bcdDevice */
++    rec[0x132] = dd[4];                             /* bDeviceClass */
++    rec[0x133] = dd[5];                             /* bDeviceSubClass */
++    rec[0x134] = dd[6];                             /* bDeviceProtocol */
++    rec[0x135] = 0;         /* bConfigurationValue: the client configures it */
++    rec[0x136] = dd[17];                            /* bNumConfigurations */
++    rec[0x137] = usbip_count_interfaces(s, false);  /* bNumInterfaces */
++    usbip_send(s, rec, sizeof(rec));
++    if (with_interfaces) {
++        usbip_count_interfaces(s, true);
++    }
++}
++
++/* Operations (before import) */
++
++static void usbip_reply_devlist(USBIPServerState *s)
++{
++    uint8_t n[4];
++    bool listed = usbip_device_present(s) && s->enumerated;
++
++    usbip_send_op_header(s, USBIP_OP_REP_DEVLIST, 0);
++    stl_be_p(n, listed ? 1 : 0);
++    usbip_send(s, n, sizeof(n));
++    if (listed) {
++        usbip_send_device_record(s, true);
++    }
++}
++
++static void usbip_reply_import(USBIPServerState *s, bool ok)
++{
++    if (!ok) {
++        usbip_send_op_header(s, USBIP_OP_REP_IMPORT, 1);
++        return;
++    }
++    usbip_send_op_header(s, USBIP_OP_REP_IMPORT, 0);
++    usbip_send_device_record(s, false);
++    s->conn = USBIP_CONN_ATTACHED;
++    trace_usbip_server_connection("attached");
++}
++
++static void usbip_parse(USBIPServerState *s);
++
++/*
++ * Self-enumeration.  vhci-hcd never sends SET_ADDRESS or a port reset, so
++ * the server does what a host's hub driver would before handing over the
++ * device: reset the port, give the device an address, read its device and
++ * configuration descriptors (for the device record).
++ */
++
++static const uint8_t usbip_enum_setup[3][8] = {
++    { 0x00, USB_REQ_SET_ADDRESS, USBIP_DEVNUM, 0, 0, 0, 0, 0 },
++    { 0x80, USB_REQ_GET_DESCRIPTOR, 0, USB_DT_DEVICE, 0, 0, 18, 0 },
++    { 0x80, USB_REQ_GET_DESCRIPTOR, 0, USB_DT_CONFIG, 0, 0, 9, 0 },
++};
++
++static void usbip_enum_issue(USBIPServerState *s)
++{
++    uint8_t setup[8];
++    USBIPURB *u;
++
++    memcpy(setup, usbip_enum_setup[MIN(s->enum_step, 2)], sizeof(setup));
++    if (s->enum_step == 3) {
++        stw_le_p(setup + 6, s->cfg_len);    /* the whole configuration */
++    }
++    u = usbip_urb_new(0, lduw_le_p(setup + 6));
++    u->internal = true;
++    u->epnum = 0;
++    u->in = setup[0] & USB_DIR_IN;
++    memcpy(u->setup, setup, sizeof(setup));
++    usbip_urb_submit(s, u);
++}
++
++static void usbip_enum_finish(USBIPServerState *s, bool ok)
++{
++    uint16_t op = s->enum_op;
++
++    s->enum_op = 0;
++    s->conn = USBIP_CONN_OP;
++    if (op == USBIP_OP_REQ_DEVLIST) {
++        usbip_reply_devlist(s);
++    } else {
++        usbip_reply_import(s, ok);
++    }
++    usbip_parse(s);             /* anything the client sent meanwhile */
++}
++
++static void usbip_enum_done(USBIPServerState *s, USBIPURB *u)
++{
++    bool ok = u->packet.status == USB_RET_SUCCESS;
++    int actual = u->packet.actual_length;
++
++    trace_usbip_server_enumerate(s->enum_step, u->packet.status);
++    switch (s->enum_step) {
++    case 1:
++        ok = ok && actual == 18 && u->buf[1] == USB_DT_DEVICE;
++        if (ok) {
++            memcpy(s->dev_desc, u->buf, sizeof(s->dev_desc));
++        }
++        break;
++    case 2:
++        ok = ok && actual == 9 && u->buf[1] == USB_DT_CONFIG &&
++             lduw_le_p(u->buf + 2) >= 9;
++        if (ok) {
++            s->cfg_len = lduw_le_p(u->buf + 2);
++        }
++        break;
++    case 3:
++        ok = ok && actual == s->cfg_len;
++        if (ok) {
++            g_free(s->cfg_desc);
++            s->cfg_desc = g_memdup2(u->buf, actual);
++        }
++        break;
++    }
++    usbip_urb_free(u);
++
++    if (!ok) {
++        usbip_enum_finish(s, false);
++    } else if (++s->enum_step == 4) {
++        s->enumerated = true;
++        usbip_enum_finish(s, true);
++    } else {
++        usbip_enum_issue(s);
++    }
++}
++
++static void usbip_enumerate(USBIPServerState *s, uint16_t op)
++{
++    s->conn = USBIP_CONN_ENUMERATING;
++    s->enum_op = op;
++    s->enum_step = 0;
++    s->enumerated = false;
++    s->port_resetting = true;
++    usb_port_reset(&s->port);
++    s->port_resetting = false;
++    usbip_enum_issue(s);
++}
++
++static void usbip_handle_op(USBIPServerState *s, const uint8_t *d)
++{
++    uint16_t code = lduw_be_p(d + 2);
++    char busid[USBIP_BUSID_LEN + 1];
++
++    trace_usbip_server_op(code);
++    switch (code) {
++    case USBIP_OP_REQ_DEVLIST:
++        if (usbip_device_present(s)) {
++            usbip_enumerate(s, USBIP_OP_REQ_DEVLIST);
++        } else {
++            usbip_reply_devlist(s);
++        }
++        break;
++    case USBIP_OP_REQ_IMPORT:
++        memcpy(busid, d + USBIP_OP_HDR_LEN, USBIP_BUSID_LEN);
++        busid[USBIP_BUSID_LEN] = '\0';
++        if (usbip_device_present(s) && !strcmp(busid, USBIP_BUSID)) {
++            usbip_enumerate(s, USBIP_OP_REQ_IMPORT);
++        } else {
++            usbip_reply_import(s, false);
++        }
++        break;
++    default:
++        g_assert_not_reached();     /* usbip_msg_len() rejected it */
++    }
++}
++
++/* URB commands (after import) */
++
++static void usbip_handle_submit(USBIPServerState *s, const uint8_t *d)
++{
++    USBIPURB *u = usbip_urb_new(ldl_be_p(d + 0x04), ldl_be_p(d + 0x18));
++    int32_t np = ldl_be_p(d + 0x20);
++    const uint8_t *desc;
++    int i;
++
++    u->in = ldl_be_p(d + 0x0c) == USBIP_DIR_IN;
++    u->epnum = ldl_be_p(d + 0x10);
++    u->flags = ldl_be_p(d + 0x14);
++    u->start_frame = ldl_be_p(d + 0x1c);
++    memcpy(u->setup, d + 0x28, sizeof(u->setup));
++    if (!u->in) {
++        memcpy(u->buf, d + USBIP_HDR_LEN, u->len);
++    }
++    if (np > 0) {
++        u->number_of_packets = np;
++        u->iso = g_new0(USBIPIsoDesc, np);
++        desc = d + USBIP_HDR_LEN + (u->in ? 0 : u->len);
++        for (i = 0; i < np; i++, desc += USBIP_ISO_DESC_LEN) {
++            u->iso[i].offset = ldl_be_p(desc);
++            u->iso[i].length = ldl_be_p(desc + 4);
++            if (u->iso[i].offset > u->len ||
++                u->iso[i].length > u->len - u->iso[i].offset) {
++                usbip_urb_free(u);
++                usbip_drop_client(s, "ISO packet outside its transfer buffer");
++                return;
++            }
++        }
++    }
++    trace_usbip_server_submit(u->seqnum, u->epnum, u->in, u->len,
++                              u->number_of_packets);
++    usbip_urb_submit(s, u);
++}
++
++static USBIPURB *usbip_find_urb(USBIPServerState *s, uint32_t seqnum)
++{
++    USBIPURB *u;
++    int i;
++
++    QTAILQ_FOREACH(u, &s->inflight, next) {
++        if (!u->internal && u->seqnum == seqnum) {
++            return u;
++        }
++    }
++    for (i = 0; i < USBIP_NUM_KEYS; i++) {
++        QTAILQ_FOREACH(u, &s->waiting[i], next) {
++            if (!u->internal && u->seqnum == seqnum) {
++                return u;
++            }
++        }
++    }
++    return NULL;
++}
++
++/*
++ * -ECONNRESET if the URB was still pending (no RET_SUBMIT will follow),
++ * 0 if it had already completed.
++ */
++static void usbip_handle_unlink(USBIPServerState *s, uint32_t seqnum,
++                                uint32_t victim)
++{
++    uint8_t h[USBIP_HDR_LEN] = { 0 };
++    USBIPURB *u = usbip_find_urb(s, victim);
++    int32_t status = 0;
++
++    if (u) {
++        usbip_urb_unlink(s, u);
++        usbip_urb_free(u);
++        status = -USBIP_ECONNRESET;
++    }
++    trace_usbip_server_unlink(seqnum, victim, status);
++    stl_be_p(h + 0x00, USBIP_RET_UNLINK);
++    stl_be_p(h + 0x04, seqnum);
++    stl_be_p(h + 0x14, status);
++    usbip_send(s, h, sizeof(h));
++}
++
++/* Input */
++
++/*
++ * Length of the message at the head of the receive buffer: 0 while its
++ * header is incomplete, -1 if it is malformed.
++ */
++static ssize_t usbip_msg_len(USBIPServerState *s, const uint8_t *d, size_t n)
++{
++    if (s->conn == USBIP_CONN_OP) {
++        if (n < USBIP_OP_HDR_LEN) {
++            return 0;
++        }
++        if (lduw_be_p(d) != USBIP_VERSION) {
++            return -1;
++        }
++        switch (lduw_be_p(d + 2)) {
++        case USBIP_OP_REQ_DEVLIST:
++            return USBIP_OP_HDR_LEN;
++        case USBIP_OP_REQ_IMPORT:
++            return USBIP_OP_HDR_LEN + USBIP_BUSID_LEN;
++        default:
++            return -1;
++        }
++    }
++
++    if (n < USBIP_HDR_LEN) {
++        return 0;
++    }
++    switch (ldl_be_p(d)) {
++    case USBIP_CMD_SUBMIT: {
++        uint32_t dir = ldl_be_p(d + 0x0c), ep = ldl_be_p(d + 0x10);
++        int32_t len = ldl_be_p(d + 0x18), np = ldl_be_p(d + 0x20);
++        ssize_t total = USBIP_HDR_LEN;
++
++        if (dir > USBIP_DIR_IN || ep > 15 || len < 0 || len > USBIP_MAX_XFER) {
++            return -1;
++        }
++        if (dir == USBIP_DIR_OUT) {
++            total += len;
++        }
++        if (np > USBIP_MAX_ISO_PACKETS) {
++            return -1;
++        }
++        if (np > 0) {
++            total += (ssize_t)np * USBIP_ISO_DESC_LEN;
++        }
++        return total;
++    }
++    case USBIP_CMD_UNLINK:
++        return USBIP_HDR_LEN;
++    default:
++        return -1;
++    }
++}
++
++static void usbip_dispatch(USBIPServerState *s, const uint8_t *d, size_t n)
++{
++    if (s->conn == USBIP_CONN_OP) {
++        usbip_handle_op(s, d);
++    } else if (ldl_be_p(d) == USBIP_CMD_SUBMIT) {
++        usbip_handle_submit(s, d);
++    } else {
++        usbip_handle_unlink(s, ldl_be_p(d + 0x04), ldl_be_p(d + 0x14));
++    }
++}
++
++static void usbip_parse(USBIPServerState *s)
++{
++    if (s->parsing) {
++        /* re-entered from a synchronous completion: the outer loop goes on */
++        return;
++    }
++    s->parsing = true;
++    while (s->conn == USBIP_CONN_OP || s->conn == USBIP_CONN_ATTACHED) {
++        ssize_t need = usbip_msg_len(s, s->rx->data, s->rx->len);
++        g_autofree uint8_t *msg = NULL;
++
++        if (need < 0) {
++            usbip_drop_client(s, "malformed message");
++            break;
++        }
++        if (need == 0 || need > s->rx->len) {
++            break;
++        }
++        msg = g_memdup2(s->rx->data, need);
++        g_byte_array_remove_range(s->rx, 0, need);
++        usbip_dispatch(s, msg, need);
++    }
++    s->parsing = false;
++}
++
++static int usbip_can_read(void *opaque)
++{
++    USBIPServerState *s = opaque;
++
++    return s->conn == USBIP_CONN_NONE ? 0 : 64 * KiB;
++}
++
++static void usbip_read(void *opaque, const uint8_t *buf, int size)
++{
++    USBIPServerState *s = opaque;
++
++    g_byte_array_append(s->rx, buf, size);
++    usbip_parse(s);
++}
++
++static void usbip_event(void *opaque, QEMUChrEvent event)
++{
++    USBIPServerState *s = opaque;
++
++    switch (event) {
++    case CHR_EVENT_OPENED:
++        usbip_reset_connection(s);
++        s->conn = USBIP_CONN_OP;
++        trace_usbip_server_connection("opened");
++        break;
++    case CHR_EVENT_CLOSED:
++        usbip_reset_connection(s);
++        trace_usbip_server_connection("closed");
++        break;
++    default:
++        break;
++    }
++}
++
++/* The USB port */
++
++static void usbip_port_attach(USBPort *port)
++{
++}
++
++static void usbip_port_detach(USBPort *port)
++{
++    USBIPServerState *s = port->opaque;
++
++    if (s->port_resetting) {
++        return;                 /* our own port reset, not an unplug */
++    }
++    s->enumerated = false;
++    /*
++     * A USB/IP exporter reports that its device went away by closing the
++     * connection, as Linux's usbip-host does.
++     */
++    if (s->conn == USBIP_CONN_ATTACHED || s->conn == USBIP_CONN_ENUMERATING) {
++        trace_usbip_server_connection("device detached");
++        usbip_close_client(s);
++    }
++}
++
++static void usbip_port_child_detach(USBPort *port, USBDevice *child)
++{
++}
++
++static void usbip_port_wakeup(USBPort *port)
++{
++    USBIPServerState *s = port->opaque;
++
++    qemu_bh_schedule(s->retry_bh);
++}
++
++static void usbip_port_complete(USBPort *port, USBPacket *p)
++{
++    USBIPServerState *s = port->opaque;
++    USBIPURB *u = container_of(p, USBIPURB, packet);
++
++    QTAILQ_REMOVE(&s->inflight, u, next);
++    if (p->status == USB_RET_REMOVE_FROM_QUEUE) {
++        /*
++         * An earlier URB on this endpoint stalled.  Keep this one queued
++         * (the client recovers with CLEAR_FEATURE(HALT) and decides);
++         * it is retried once the stall has been reported.
++         */
++        usb_cancel_packet(p);
++        u->state = USBIP_URB_WAITING;
++        QTAILQ_INSERT_TAIL(&s->waiting[usbip_urb_key(u)], u, next);
++        qemu_bh_schedule(s->retry_bh);
++        return;
++    }
++    usbip_urb_complete(s, u);
++}
++
++static USBPortOps usbip_port_ops = {
++    .attach = usbip_port_attach,
++    .detach = usbip_port_detach,
++    .child_detach = usbip_port_child_detach,
++    .wakeup = usbip_port_wakeup,
++    .complete = usbip_port_complete,
++};
++
++static void usbip_wakeup_endpoint(USBBus *bus, USBEndpoint *ep,
++                                  unsigned int stream)
++{
++    USBIPServerState *s = container_of(bus, USBIPServerState, bus);
++
++    qemu_bh_schedule(s->retry_bh);
++}
++
++static USBBusOps usbip_bus_ops = {
++    .wakeup_endpoint = usbip_wakeup_endpoint,
++};
++
++/* The device */
++
++static void usbip_server_reset_hold(Object *obj, ResetType type)
++{
++    USBIPServerState *s = USBIP_SERVER(obj);
++
++    /* The exported device is reset under the client: drop it. */
++    if (s->conn != USBIP_CONN_NONE) {
++        trace_usbip_server_connection("system reset");
++        usbip_close_client(s);
++    }
++}
++
++static void usbip_server_realize(DeviceState *dev, Error **errp)
++{
++    USBIPServerState *s = USBIP_SERVER(dev);
++    int i;
++
++    if (!qemu_chr_fe_backend_connected(&s->chr)) {
++        error_setg(errp, "usbip-server: the 'chardev' property is required");
++        return;
++    }
++
++    s->rx = g_byte_array_new();
++    s->tx = g_byte_array_new();
++    QTAILQ_INIT(&s->inflight);
++    for (i = 0; i < USBIP_NUM_KEYS; i++) {
++        QTAILQ_INIT(&s->waiting[i]);
++    }
++    s->retry_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, usbip_retry_timer, s);
++    s->retry_bh = qemu_bh_new_guarded(usbip_retry_bh, s,
++                                      &dev->mem_reentrancy_guard);
++
++    usb_bus_new(&s->bus, sizeof(s->bus), &usbip_bus_ops, dev);
++    /* the exported device itself sits on the port, not a hub before it */
++    s->bus.no_auto_hub = true;
++    usb_register_port(&s->bus, &s->port, s, 0, &usbip_port_ops,
++                      USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL |
++                      USB_SPEED_MASK_HIGH);
++
++    qemu_chr_fe_set_handlers(&s->chr, usbip_can_read, usbip_read,
++                             usbip_event, NULL, s, NULL, true);
++
++}
++
++static const Property usbip_server_properties[] = {
++    DEFINE_PROP_CHR("chardev", USBIPServerState, chr),
++};
++
++static void usbip_server_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    ResettableClass *rc = RESETTABLE_CLASS(klass);
++
++    dc->realize = usbip_server_realize;
++    dc->user_creatable = true;
++    dc->hotpluggable = false;
++    dc->desc = "USB/IP server exporting the USB device on its port";
++    set_bit(DEVICE_CATEGORY_USB, dc->categories);
++    device_class_set_props(dc, usbip_server_properties);
++    rc->phases.hold = usbip_server_reset_hold;
++}
++
++static const TypeInfo usbip_server_info = {
++    .name          = TYPE_USBIP_SERVER,
++    .parent        = TYPE_SYS_BUS_DEVICE,
++    .instance_size = sizeof(USBIPServerState),
++    .class_init    = usbip_server_class_init,
++};
++
++static void usbip_server_register_types(void)
++{
++    type_register_static(&usbip_server_info);
++}
++
++type_init(usbip_server_register_types)
+diff --git a/include/hw/usb/usb.h b/include/hw/usb/usb.h
+index 78e2cee..10b9487 100644
+--- a/include/hw/usb/usb.h
++++ b/include/hw/usb/usb.h
+@@ -481,6 +481,8 @@ struct USBBus {
+     BusState qbus;
+     USBBusOps *ops;
+     int busnr;
++    /* Don't chain a usb-hub onto the last free port (see usb_claim_port) */
++    bool no_auto_hub;
+     int nfree;
+     int nused;
+     QTAILQ_HEAD(, USBPort) free;
+diff --git a/include/hw/usb/usbip-server.h b/include/hw/usb/usbip-server.h
+new file mode 100644
+index 0000000..91b2b57
+--- /dev/null
++++ b/include/hw/usb/usbip-server.h
+@@ -0,0 +1,14 @@
++/*
++ * USB/IP server: exports the QEMU USB device on its port over USB/IP
++ *
++ * Copyright (c) 2026 Tim 'mithro' Ansell <me@mith.ro>
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#ifndef HW_USB_USBIP_SERVER_H
++#define HW_USB_USBIP_SERVER_H
++
++#define TYPE_USBIP_SERVER "usbip-server"
++
++#endif
+-- 
+2.47.3
+
