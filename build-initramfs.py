@@ -6,6 +6,7 @@
 """
 
 import argparse
+import lzma
 import os
 import subprocess
 import sys
@@ -222,6 +223,30 @@ else
     echo "ttyS0: MISSING"
 fi
 
+# USB networking on the DWC2 host port, the Zero's only wired network
+# (rpi-qemu#24): the harness attaches -device usb-net.
+insmod /lib/modules/cdc_ether.ko
+insmod /lib/modules/rndis_host.ko
+nic=""
+i=0
+while [ $i -lt 30 ] && [ -z "$nic" ]; do
+    for d in /sys/class/net/*; do
+        case "$(readlink $d/device/driver 2>&1)" in
+            *cdc_ether|*rndis_host) nic=${d##*/} ;;
+        esac
+    done
+    [ -n "$nic" ] || sleep 1
+    i=$((i+1))
+done
+if [ -n "$nic" ]; then
+    echo "USB NIC: $nic driver=$(basename $(readlink /sys/class/net/$nic/device/driver))"
+    ip link set "$nic" up
+    udhcpc -i "$nic" -t 10 -T 2 -n -q 2>&1
+    ping -c 3 -W 3 10.0.2.2 2>&1
+else
+    echo "USB NIC: none"
+fi
+
 # Board identity the firmware publishes in the DT (rpi-qemu#25).
 echo "Revision: $(sed -n 's/^Revision[[:space:]]*: //p' /proc/cpuinfo)"
 echo "Serial: $(sed -n 's/^Serial[[:space:]]*: //p' /proc/cpuinfo)"
@@ -243,14 +268,18 @@ TARGETS = {
                  ttys=[("ttyAMA0", 204, 64)]),
     "rpi0": dict(tar="alpine-minirootfs-armhf.tar.gz", root="initramfs-root-rpi0",
                  output="test-initramfs-rpi0.cpio.gz", init=RPI0_INIT_SCRIPT,
-                 ttys=[("ttyS0", 4, 64)]),
+                 ttys=[("ttyS0", 4, 64)],
+                 # USB network drivers for usb-net, from the same
+                 # raspberrypi/firmware commit as the kernel (.ko.xz).
+                 modules=["cdc_ether", "rndis_host"]),
 }
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=sorted(TARGETS), default="rpi4")
-    target = TARGETS[parser.parse_args().target]
+    target_name = parser.parse_args().target
+    target = TARGETS[target_name]
     ALPINE_TAR = BASE / target["tar"]
     ROOTFS_DIR = BASE / target["root"]
     OUTPUT = BASE / target["output"]
@@ -272,6 +301,15 @@ def main():
     for name, major, minor in target["ttys"]:
         os.mknod(str(ROOTFS_DIR / "dev" / name), 0o600 | 0o020000,
                  os.makedev(major, minor))
+
+    # Kernel modules the init script loads (test-images/<target>/modules/)
+    modules = target.get("modules", [])
+    if modules:
+        mod_dir = ROOTFS_DIR / "lib" / "modules"
+        mod_dir.mkdir(parents=True, exist_ok=True)
+        for name in modules:
+            src = BASE / target_name / "modules" / f"{name}.ko.xz"
+            (mod_dir / f"{name}.ko").write_bytes(lzma.decompress(src.read_bytes()))
 
     # Write our init script
     init_path = ROOTFS_DIR / "init"

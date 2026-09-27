@@ -168,7 +168,8 @@ jobs:
             test-images/rpi0/kernel.img
             test-images/rpi0/bcm2708-rpi-zero-w.dtb
             test-images/rpi0/disable-bt.dtbo
-          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo
+            test-images/rpi0/modules
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet
 
       - name: Download RPi Zero kernel and DTB
         if: steps.cache-rpi0-kernel.outputs.cache-hit != 'true'
@@ -178,6 +179,12 @@ jobs:
           wget -q -O test-images/rpi0/kernel.img "$FW_BASE/kernel.img"
           wget -q -O test-images/rpi0/bcm2708-rpi-zero-w.dtb "$FW_BASE/bcm2708-rpi-zero-w.dtb"
           wget -q -O test-images/rpi0/disable-bt.dtbo "$FW_BASE/overlays/disable-bt.dtbo"
+          # USB network drivers for usb-net (modules of the same kernel)
+          mkdir -p test-images/rpi0/modules
+          MOD_BASE="https://raw.githubusercontent.com/raspberrypi/firmware/bead686816848038563a542dc854346ab13253a2/modules/6.18.52+/kernel/drivers/net/usb"
+          for m in cdc_ether rndis_host; do
+            wget -q -O "test-images/rpi0/modules/$m.ko.xz" "$MOD_BASE/$m.ko.xz"
+          done
 
       - name: Apply the disable-bt overlay to the Zero W DTB
         run: |

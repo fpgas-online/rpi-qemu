@@ -10,6 +10,9 @@ console=serial0,115200, i.e. the console on the mini UART.
 Regression checks for:
   - rpi-qemu#27: bcm2835-power probing the ASB bridge without an external
     abort (the abort killed the deferred-probe worker, so nothing booted);
+  - rpi-qemu#24: a usb-net NIC on the DWC2 host port binding cdc_ether,
+    getting a DHCP lease and pinging the gateway, with dwc_otg's FIQ FSM
+    enabled as Raspberry Pi OS runs it (patch 0032);
   - rpi-qemu#25: the board identity (-M raspi0,board-serial=...) reaching
     /proc/cpuinfo and /proc/device-tree/serial-number;
   - rpi-qemu#23: a host BREAK reaching magic SysRq on the PL011 but -- as
@@ -162,7 +165,10 @@ def run_test():
     print("\n--- Boot 1: console on the mini UART (ttyS0) ---")
     text, stderr_text = boot_guest(
         ["-serial", "null",          # PL011 (Bluetooth UART on a Zero W)
-         "-serial", "mon:stdio"],    # mini UART = serial0 = console
+         "-serial", "mon:stdio",     # mini UART = serial0 = console
+         # A USB Ethernet adapter on the OTG port, as a Zero gets wired
+         # networking (rpi-qemu#24); DHCP comes from -netdev user.
+         "-netdev", "user,id=usbnet0", "-device", "usb-net,netdev=usbnet0"],
         BOOTARGS + " sysrq_always_enabled",
         lambda send: (send(BREAK, 1.0), send(RX_LINE + "\n")))
 
@@ -189,6 +195,10 @@ def run_test():
         ("Console on ttyS0",       "console [ttyS0] enabled"),
         ("Userspace console",      "Console: ttyS0"),
         ("RX over mini UART",      f"RX test: got [{RX_LINE}]"),
+        ("dwc_otg FIQ FSM enabled", "FIQ FSM acceleration enabled"),
+        ("usb-net NIC bound (#24)", "USB NIC: usb0 driver=cdc_ether"),
+        ("DHCP over usb-net (#24)", "lease of 10.0.2.15 obtained from 10.0.2.2"),
+        ("Ping over usb-net (#24)", "3 packets transmitted, 3 packets received"),
         ("cpuinfo Revision (#25)", "Revision: 920092"),
         ("cpuinfo Serial (#25)",   f"Serial: {BOARD_SERIAL}"),
         ("DT serial-number (#25)", f"DT serial-number: {BOARD_SERIAL}"),
@@ -240,6 +250,7 @@ def run_test():
         for kw in ["Linux version", "Kernel command line", "power domains",
                    "external abort", "PC is at", "ttyS0", "Cmdline:",
                    "Console:", "RX test:", "Revision:", "Serial:",
+                   "USB NIC:", "lease of", "packets transmitted",
                    "serial-number:", "raspi0 test complete"]:
             if kw in s:
                 print(f"  > {s[:150]}")
