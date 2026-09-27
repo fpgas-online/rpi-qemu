@@ -189,6 +189,6 @@ Decisions made during implementation, beyond §4:
 ## 11. Open items
 
 - Confirm the `DPTXFSIZn` reset values against a register read of a host-mode Zero (requested; blocked on SSH access to the fleet).
-- `URB_ZERO_PACKET` from USB/IP clients is not turned into a trailing zero-length packet; Linux's `cdc_acm`, `cdc_ether` and `cdc_ncm` do not set it (they pad), so no tested function depends on it.
+- `URB_ZERO_PACKET` from USB/IP clients is not turned into a trailing zero-length packet. Linux sets it only for particular devices: `cdc-acm` for its `SEND_ZERO_PACKET` quirk IDs, `usbnet` only with `FLAG_SEND_ZLP`, which `cdc_ether` never uses and `cdc_ncm` only for listed devices (checked in rpi-6.18.y); for other devices they pad instead, so none of the tested functions depend on it.
 - Local run of Linux's own class drivers (`cdc_acm`, `cdc_ether`/`cdc_ncm`, `usb-storage`) binding the gadget through `usbip attach` — needs `vhci-hcd` loaded on a machine that has them.
 - Host-role USB/IP client (Renode/`usbipd` interop in the other direction) — separate spec.
