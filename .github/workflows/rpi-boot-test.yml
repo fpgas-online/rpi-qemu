@@ -236,6 +236,13 @@ jobs:
         run: |
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi0-boot-test.py
 
+      - name: USB/IP client unit tests
+        run: python3 ci/test_usbip_client.py
+
+      - name: Run USB/IP server test
+        run: |
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-usbip-test.py
+
       - name: Download PXE boot firmware (this run)
         if: env.QEMU_SOURCE == 'artifact'
         uses: actions/download-artifact@v4
