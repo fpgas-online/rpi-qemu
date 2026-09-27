@@ -110,7 +110,7 @@ def main():
     debian_dst = source_dir / "debian"
     if debian_dst.exists():
         shutil.rmtree(debian_dst)
-    shutil.copytree(BASE / "debian", debian_dst)
+    shutil.copytree(REPO_ROOT / "packaging" / "debian" / "qemu-rpi", debian_dst)
 
     # Step 4: Install our patches and regenerate the series file.
     # The series file is ALWAYS regenerated from the files on disk so

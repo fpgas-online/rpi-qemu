@@ -43,9 +43,9 @@ jobs:
         id: version
         run: |
           apt-get install -y dpkg-dev python3
-          python3 ci/gen-changelog.py > ci/debian/changelog
-          cat ci/debian/changelog
-          version=$(dpkg-parsechangelog -l ci/debian/changelog -S Version)
+          python3 ci/gen-changelog.py > packaging/debian/qemu-rpi/changelog
+          cat packaging/debian/qemu-rpi/changelog
+          version=$(dpkg-parsechangelog -l packaging/debian/qemu-rpi/changelog -S Version)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Package version: $version"
 
