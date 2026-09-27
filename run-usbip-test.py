@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -208,6 +209,72 @@ def test_bulk_mass_storage():
         expect(f.read(len(pattern)) == pattern, "image file lacks the written data")
 
 
+
+def storage_read_cbw(tag, blocks):
+    """A Bulk-Only CBW for READ(10) of @blocks blocks from LBA 0."""
+    cdb = struct.pack(">BBIBHB", 0x28, 0, 0, 0, blocks, 0)
+    return struct.pack("<IIIBBB16s", u.BulkOnlyStorage.CBW_SIG, tag,
+                       blocks * 512, 0x80, 0, len(cdb), cdb.ljust(16, b"\0"))
+
+
+def test_iso_urb_to_bulk_endpoint_stalls():
+    """An URB with ISO packet descriptors for a bulk endpoint -- which the
+    device may answer asynchronously -- stalls packet by packet; QEMU and
+    the connection survive."""
+    with QemuUsbip(storage_args(storage_image())) as q, q.client() as c:
+        c.import_device("1-1")
+        expect(c.set_configuration(1).status == 0, "SET_CONFIGURATION")
+        u.BulkOnlyStorage(c).ready()
+        r = c.wait(c.submit(2, u.DIR_OUT, data=storage_read_cbw(7, 128)))
+        expect(r.status == 0, "CBW")
+        iso = [u.IsoPacket(0, 512), u.IsoPacket(512, 512)]
+        r = c.wait(c.submit(1, u.DIR_IN, 1024, iso=iso))
+        expect(r.error_count == 2 and all(p.status == -u.EPIPE for p in r.iso),
+               f"ISO packets on a bulk endpoint: {r.iso}")
+        expect(c.get_descriptor(1, 0, 18).status == 0, "connection after ISO")
+        expect(q.alive(), "QEMU exited")
+
+
+def test_unlink_urb_the_device_holds():
+    """Unlinking the URB the device is working on hands the ones queued
+    behind it to the device (as Linux's usbip-host submits each URB)."""
+    with QemuUsbip(storage_args(storage_image())) as q, q.client() as c:
+        c.import_device("1-1")
+        expect(c.set_configuration(1).status == 0, "SET_CONFIGURATION")
+        u.BulkOnlyStorage(c).ready()
+        # one write, so the device is still working on A when the
+        # unlink arrives
+        cbw, a, b, ul = 101, 102, 103, 104
+        raw = (u.pack_cmd_submit(cbw, c.devid, u.DIR_OUT, 2, 0, 31, 0, 0, 0,
+                                 bytes(8), storage_read_cbw(8, 128))
+               + u.pack_cmd_submit(a, c.devid, u.DIR_IN, 1, 0, 32768, 0, 0, 0,
+                                   bytes(8))
+               + u.pack_cmd_submit(b, c.devid, u.DIR_IN, 1, 0, 32768, 0, 0, 0,
+                                   bytes(8))
+               + struct.pack(">IIIII I 24x", u.CMD_UNLINK, ul, c.devid, 0, 0, a))
+        c._pending.update({cbw: (u.DIR_OUT, 0), a: (u.DIR_IN, 0),
+                           b: (u.DIR_IN, 0), ul: None})
+        c._seq = 200
+        c.sock.sendall(raw)
+        expect(c.wait(cbw).status == 0, "CBW")
+        r = c.wait(ul)
+        expect(r.status == -u.ECONNRESET, f"RET_UNLINK {r.status}: A was not held")
+        # Cancelling A aborts its SCSI command.  B must now be the
+        # device's IN packet (not left behind in QEMU's endpoint queue):
+        # after a Bulk-Only reset, the next command's data arrives in it.
+        expect(c.control(0x21, 0xff, 0, 0, b"").status == 0, "BOT reset")
+        inquiry = bytes([0x12, 0, 0, 0, 36, 0])
+        cbw2 = struct.pack("<IIIBBB16s", u.BulkOnlyStorage.CBW_SIG, 9, 36,
+                           0x80, 0, len(inquiry), inquiry.ljust(16, b"\0"))
+        expect(c.wait(c.submit(2, u.DIR_OUT, data=cbw2)).status == 0, "CBW 2")
+        rb = c.poll(b, 5)
+        expect(rb is not None and rb.status == 0 and rb.data[8:16] == b"QEMU    ",
+               f"URB queued behind the unlinked one: {rb}")
+        csw = c.wait(c.submit(1, u.DIR_IN, 13))
+        expect(csw.status == 0 and csw.data[:4] == b"USBS", f"CSW {csw}")
+        expect(q.alive(), "QEMU exited")
+
+
 KBD_ARGS = ["-device", "usb-kbd,bus=usbip0.0,id=kbd0"]
 
 
@@ -357,6 +424,10 @@ TESTS = [
     ("Interrupt IN waits (NAK) and completes on a key press", test_interrupt_in_waits_for_data),
     ("CMD_UNLINK of a pending URB: -ECONNRESET, no RET_SUBMIT", test_unlink_pending_urb),
     ("CMD_UNLINK of a completed URB: status 0", test_unlink_completed_urb),
+    ("ISO URB to a bulk endpoint stalls per packet; QEMU survives",
+     test_iso_urb_to_bulk_endpoint_stalls),
+    ("CMD_UNLINK of the URB the device holds; the next one reaches it",
+     test_unlink_urb_the_device_holds),
     ("Isochronous OUT: per-packet lengths and status", test_isochronous_out),
     ("Isochronous to a disabled stream: each packet stalls, stream in sync",
      test_isochronous_to_disabled_stream_stalls_each_packet),
