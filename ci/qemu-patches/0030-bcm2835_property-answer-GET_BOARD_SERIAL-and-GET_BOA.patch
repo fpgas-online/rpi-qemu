@@ -1,0 +1,220 @@
+From bc4bf382b063b0497dce5f3126697a8bb5efc836 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 19:21:08 +0930
+Subject: [PATCH] bcm2835_property: answer GET_BOARD_SERIAL and GET_BOARD_MODEL
+
+Both firmware property tags set a response length but never wrote a
+value, so the guest read back whatever its buffer already held as a
+successful answer (rpi-qemu#25).  U-Boot, for one, turns GET_BOARD_SERIAL
+into its serial# variable.
+
+Add a board-serial property to the raspi machines (-M raspi0,board-serial=
+0x...), plumbed like board-rev through the SoC and peripherals to the
+property device, defaulting to an arbitrary stable 0x0000000012345678 so
+guests see a deterministic identity; a CI job can pin its own and assert
+on it end to end.  GET_BOARD_SERIAL returns it as the 64-bit value the
+tag defines.
+
+GET_BOARD_MODEL returns 0.  No numbering is documented for this tag,
+boards are identified by GET_BOARD_REVISION, and real firmware has been
+reported answering 0 (Raspberry Pi forums, "Mailbox property tags",
+2013: "All 0 for board model"; "0x0 ... on a Model A").  A deterministic
+0 is what the issue asks for at minimum, and better than stale memory.
+
+Checked with U-Boot on raspi4b: "printenv serial#" shows
+serial#=0000000012345678.
+
+Part of https://github.com/fpgas-online/rpi-qemu/issues/25
+---
+ hw/arm/bcm2835_peripherals.c       |  2 ++
+ hw/arm/bcm2836.c                   |  2 ++
+ hw/arm/bcm2838.c                   |  2 ++
+ hw/arm/raspi.c                     | 32 ++++++++++++++++++++++++++++++
+ hw/misc/bcm2835_property.c         | 15 ++++++++------
+ include/hw/arm/raspi_platform.h    |  8 ++++++++
+ include/hw/misc/bcm2835_property.h |  1 +
+ 7 files changed, 56 insertions(+), 6 deletions(-)
+
+diff --git a/hw/arm/bcm2835_peripherals.c b/hw/arm/bcm2835_peripherals.c
+index 289a1d3..07374a8 100644
+--- a/hw/arm/bcm2835_peripherals.c
++++ b/hw/arm/bcm2835_peripherals.c
+@@ -125,6 +125,8 @@ static void raspi_peripherals_base_init(Object *obj)
+                             TYPE_BCM2835_PROPERTY);
+     object_property_add_alias(obj, "board-rev", OBJECT(&s->property),
+                               "board-rev");
++    object_property_add_alias(obj, "board-serial", OBJECT(&s->property),
++                              "board-serial");
+     object_property_add_alias(obj, "command-line", OBJECT(&s->property),
+                               "command-line");
+ 
+diff --git a/hw/arm/bcm2836.c b/hw/arm/bcm2836.c
+index f4ecea9..db4133c 100644
+--- a/hw/arm/bcm2836.c
++++ b/hw/arm/bcm2836.c
+@@ -45,6 +45,8 @@ static void bcm283x_init(Object *obj)
+                             TYPE_BCM2835_PERIPHERALS);
+     object_property_add_alias(obj, "board-rev", OBJECT(&s->peripherals),
+                               "board-rev");
++    object_property_add_alias(obj, "board-serial", OBJECT(&s->peripherals),
++                              "board-serial");
+     object_property_add_alias(obj, "command-line", OBJECT(&s->peripherals),
+                               "command-line");
+     object_property_add_alias(obj, "vcram-size", OBJECT(&s->peripherals),
+diff --git a/hw/arm/bcm2838.c b/hw/arm/bcm2838.c
+index 9d96dc1..78747b2 100644
+--- a/hw/arm/bcm2838.c
++++ b/hw/arm/bcm2838.c
+@@ -52,6 +52,8 @@ static void bcm2838_init(Object *obj)
+                             TYPE_BCM2838_PERIPHERALS);
+     object_property_add_alias(obj, "board-rev", OBJECT(&s->peripherals),
+                               "board-rev");
++    object_property_add_alias(obj, "board-serial", OBJECT(&s->peripherals),
++                              "board-serial");
+     object_property_add_alias(obj, "vcram-size", OBJECT(&s->peripherals),
+                               "vcram-size");
+     object_property_add_alias(obj, "vcram-base", OBJECT(&s->peripherals),
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index ac39f43..5a7db0a 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -16,6 +16,7 @@
+ #include "qemu/units.h"
+ #include "qemu/cutils.h"
+ #include "qapi/error.h"
++#include "qapi/visitor.h"
+ #include "hw/arm/boot.h"
+ #include "hw/arm/bcm2836.h"
+ #include "hw/arm/bcm2838.h"
+@@ -451,6 +452,9 @@ void raspi_base_machine_init(MachineState *machine,
+     object_property_add_const_link(OBJECT(soc), "ram", OBJECT(machine->ram));
+     object_property_set_int(OBJECT(soc), "board-rev", board_rev,
+                             &error_abort);
++    object_property_set_uint(OBJECT(soc), "board-serial",
++                             RASPI_BASE_MACHINE(machine)->board_serial,
++                             &error_abort);
+     object_property_set_str(OBJECT(soc), "command-line",
+                             machine->kernel_cmdline, &error_abort);
+     qdev_realize(DEVICE(soc), NULL, &error_fatal);
+@@ -496,6 +500,32 @@ void raspi_machine_init(MachineState *machine)
+     raspi_base_machine_init(machine, &soc->parent_obj);
+ }
+ 
++static void raspi_get_board_serial(Object *obj, Visitor *v, const char *name,
++                                   void *opaque, Error **errp)
++{
++    visit_type_uint64(v, name, &RASPI_BASE_MACHINE(obj)->board_serial, errp);
++}
++
++static void raspi_set_board_serial(Object *obj, Visitor *v, const char *name,
++                                   void *opaque, Error **errp)
++{
++    visit_type_uint64(v, name, &RASPI_BASE_MACHINE(obj)->board_serial, errp);
++}
++
++static void raspi_base_machine_instance_init(Object *obj)
++{
++    RASPI_BASE_MACHINE(obj)->board_serial = RPI_DEFAULT_BOARD_SERIAL;
++}
++
++static void raspi_base_machine_class_init(ObjectClass *oc, const void *data)
++{
++    object_class_property_add(oc, "board-serial", "uint64",
++                              raspi_get_board_serial, raspi_set_board_serial,
++                              NULL, NULL);
++    object_class_property_set_description(oc, "board-serial",
++        "Board serial number, as reported by the emulated firmware");
++}
++
+ void raspi_machine_class_common_init(MachineClass *mc,
+                                      uint32_t board_rev)
+ {
+@@ -603,7 +633,9 @@ static const TypeInfo raspi_machine_types[] = {
+         .name           = TYPE_RASPI_BASE_MACHINE,
+         .parent         = TYPE_MACHINE,
+         .instance_size  = sizeof(RaspiBaseMachineState),
++        .instance_init  = raspi_base_machine_instance_init,
+         .class_size     = sizeof(RaspiBaseMachineClass),
++        .class_init     = raspi_base_machine_class_init,
+         .abstract       = true,
+     }
+ };
+diff --git a/hw/misc/bcm2835_property.c b/hw/misc/bcm2835_property.c
+index fdb2411..ba06c89 100644
+--- a/hw/misc/bcm2835_property.c
++++ b/hw/misc/bcm2835_property.c
+@@ -56,9 +56,13 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
+             resplen = 4;
+             break;
+         case RPI_FWREQ_GET_BOARD_MODEL:
+-            qemu_log_mask(LOG_UNIMP,
+-                          "bcm2835_property: 0x%08x get board model NYI\n",
+-                          tag);
++            /*
++             * No model numbering is documented for this tag, and real
++             * firmware has been seen to answer 0; answer that rather than
++             * leave the guest's buffer as it was.  Boards are identified
++             * by GET_BOARD_REVISION.
++             */
++            stl_le_phys(&s->dma_as, value + 12, 0);
+             resplen = 4;
+             break;
+         case RPI_FWREQ_GET_BOARD_REVISION:
+@@ -71,9 +75,7 @@ static void bcm2835_property_mbox_push(BCM2835PropertyState *s, uint32_t value)
+                              MEMTXATTRS_UNSPECIFIED);
+             break;
+         case RPI_FWREQ_GET_BOARD_SERIAL:
+-            qemu_log_mask(LOG_UNIMP,
+-                          "bcm2835_property: 0x%08x get board serial NYI\n",
+-                          tag);
++            stq_le_phys(&s->dma_as, value + 12, s->board_serial);
+             resplen = 8;
+             break;
+         case RPI_FWREQ_GET_ARM_MEMORY:
+@@ -579,6 +581,7 @@ static void bcm2835_property_realize(DeviceState *dev, Error **errp)
+ 
+ static const Property bcm2835_property_props[] = {
+     DEFINE_PROP_UINT32("board-rev", BCM2835PropertyState, board_rev, 0),
++    DEFINE_PROP_UINT64("board-serial", BCM2835PropertyState, board_serial, 0),
+     DEFINE_PROP_STRING("command-line", BCM2835PropertyState, command_line),
+ };
+ 
+diff --git a/include/hw/arm/raspi_platform.h b/include/hw/arm/raspi_platform.h
+index 99537d8..e3fc843 100644
+--- a/include/hw/arm/raspi_platform.h
++++ b/include/hw/arm/raspi_platform.h
+@@ -38,11 +38,19 @@
+ OBJECT_DECLARE_TYPE(RaspiBaseMachineState, RaspiBaseMachineClass,
+                     RASPI_BASE_MACHINE)
+ 
++/*
++ * Default board serial number (machine property "board-serial").  Real
++ * boards have a unique serial in OTP; this is an arbitrary stable value so
++ * that guests see a deterministic identity unless one is chosen.
++ */
++#define RPI_DEFAULT_BOARD_SERIAL 0x0000000012345678ULL
++
+ struct RaspiBaseMachineState {
+     /*< private >*/
+     MachineState parent_obj;
+     /*< public >*/
+     struct arm_boot_info binfo;
++    uint64_t board_serial;
+ };
+ 
+ struct RaspiBaseMachineClass {
+diff --git a/include/hw/misc/bcm2835_property.h b/include/hw/misc/bcm2835_property.h
+index 53d2a92..fe7a6e5 100644
+--- a/include/hw/misc/bcm2835_property.h
++++ b/include/hw/misc/bcm2835_property.h
+@@ -31,6 +31,7 @@ struct BCM2835PropertyState {
+ 
+     MACAddr macaddr;
+     uint32_t board_rev;
++    uint64_t board_serial;
+     uint32_t addr;
+     char *command_line;
+     bool pending;
+-- 
+2.47.3
+
