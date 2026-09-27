@@ -262,6 +262,110 @@ echo "=== raspi0 test complete ==="
 poweroff -f 2>&1 || exec /bin/sh
 """
 
+RPI0_GADGET_INIT_SCRIPT = """\
+#!/bin/sh
+# Init for the raspi0 USB gadget test (rpi-qemu#22): the stock dwc2 driver
+# in peripheral mode with a configfs gadget, exported to the harness over
+# USB/IP.  gadget=<f>[,<f>...] on the command line picks the functions:
+# acm, ecm, ncm, ms (mass storage).
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t configfs configfs /sys/kernel/config
+
+echo "=== QEMU raspi0 gadget test ==="
+echo "Kernel: $(uname -r) $(uname -m)"
+FUNCS=$(sed -n 's/.*gadget=\\([a-z,]*\\).*/\\1/p' /proc/cmdline | tr , ' ')
+echo "Functions: $FUNCS"
+
+for m in roles dwc2 libcomposite u_serial usb_f_acm u_ether usb_f_ecm \\
+         usb_f_ncm usb_f_mass_storage; do
+    insmod /lib/modules/$m.ko || echo "insmod $m: FAILED"
+done
+
+UDC=""
+i=0
+while [ $i -lt 20 ] && [ -z "$UDC" ]; do
+    UDC=$(ls /sys/class/udc 2>&1 | grep usb)
+    [ -n "$UDC" ] || sleep 0.5
+    i=$((i+1))
+done
+echo "UDC: ${UDC:-none}"
+dmesg | grep -e "dwc2" | tail -20
+
+G=/sys/kernel/config/usb_gadget/g1
+mkdir $G
+echo 0x1d6b > $G/idVendor      # Linux Foundation
+echo 0x0104 > $G/idProduct     # Multifunction Composite Gadget
+echo 0x0100 > $G/bcdDevice
+echo 0x0200 > $G/bcdUSB
+mkdir $G/strings/0x409
+echo rpi-qemu-0001 > $G/strings/0x409/serialnumber
+echo rpi-qemu > $G/strings/0x409/manufacturer
+echo "Raspberry Pi Zero gadget" > $G/strings/0x409/product
+mkdir -p $G/configs/c.1/strings/0x409
+echo test > $G/configs/c.1/strings/0x409/configuration
+echo 250 > $G/configs/c.1/MaxPower
+
+for f in $FUNCS; do
+    case $f in
+    acm)
+        mkdir $G/functions/acm.usb0
+        ln -s $G/functions/acm.usb0 $G/configs/c.1/ ;;
+    ecm|ncm)
+        mkdir $G/functions/$f.usb0
+        echo 02:00:00:00:00:02 > $G/functions/$f.usb0/dev_addr
+        echo 02:00:00:00:00:01 > $G/functions/$f.usb0/host_addr
+        ln -s $G/functions/$f.usb0 $G/configs/c.1/ ;;
+    ms)
+        dd if=/dev/zero of=/ms.img bs=512 count=2048
+        printf "RPI-QEMU-GADGET-MS" | dd of=/ms.img conv=notrunc
+        mkdir $G/functions/mass_storage.usb0
+        echo /ms.img > $G/functions/mass_storage.usb0/lun.0/file
+        ln -s $G/functions/mass_storage.usb0 $G/configs/c.1/ ;;
+    esac
+done
+echo "$UDC" > $G/UDC && echo "GADGET: bound [$FUNCS]"
+
+# A shell on the ACM port, restarted whenever the host goes away.
+if [ -d $G/functions/acm.usb0 ]; then
+    ( while :; do
+          [ -c /dev/ttyGS0 ] && setsid sh -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
+          sleep 0.5
+      done ) &
+fi
+# The network function's interface (usb0).
+if [ -d $G/functions/ecm.usb0 ] || [ -d $G/functions/ncm.usb0 ]; then
+    ip addr add 192.168.7.2/24 dev usb0
+    ip link set usb0 up
+    echo "GADGET: usb0 $(cat /sys/class/net/usb0/address)"
+fi
+
+# Report the UDC state as the host comes and goes.
+( prev=""
+  while :; do
+      st=$(cat /sys/class/udc/$UDC/state)
+      [ "$st" != "$prev" ] && echo "UDC state: $st"
+      prev=$st
+      sleep 0.2
+  done ) &
+
+echo "GADGET: READY"
+line=""
+read -t 900 line
+echo "harness: [$line]"
+if [ -f /ms.img ]; then
+    echo "MS image LBA 100: [$(dd if=/ms.img bs=512 skip=100 count=1 2>&1 | head -c 21)]"
+fi
+if [ -d /sys/class/net/usb0 ]; then
+    echo "usb0: rx_packets=$(cat /sys/class/net/usb0/statistics/rx_packets)" \\
+         "tx_packets=$(cat /sys/class/net/usb0/statistics/tx_packets)"
+fi
+dmesg | grep -i -e "dwc2" -e "gadget" -e "WARNING" -e "Oops" | tail -20
+echo "=== raspi0 gadget test complete ==="
+poweroff -f 2>&1 || exec /bin/sh
+"""
+
 TARGETS = {
     "rpi4": dict(tar="alpine-minirootfs.tar.gz", root="initramfs-root",
                  output="test-initramfs.cpio.gz", init=INIT_SCRIPT,
@@ -272,6 +376,16 @@ TARGETS = {
                  # USB network drivers for usb-net, from the same
                  # raspberrypi/firmware commit as the kernel (.ko.xz).
                  modules=["cdc_ether", "rndis_host"]),
+    # The dwc2 driver and USB gadget functions (configfs), from the same
+    # raspberrypi/firmware commit (#22).
+    "rpi0-gadget": dict(tar="alpine-minirootfs-armhf.tar.gz",
+                        root="initramfs-root-rpi0-gadget",
+                        output="test-initramfs-rpi0-gadget.cpio.gz",
+                        init=RPI0_GADGET_INIT_SCRIPT, ttys=[("ttyS0", 4, 64)],
+                        module_dir="rpi0",
+                        modules=["roles", "dwc2", "libcomposite", "u_serial",
+                                 "usb_f_acm", "u_ether", "usb_f_ecm",
+                                 "usb_f_ncm", "usb_f_mass_storage"]),
 }
 
 
@@ -308,7 +422,8 @@ def main():
         mod_dir = ROOTFS_DIR / "lib" / "modules"
         mod_dir.mkdir(parents=True, exist_ok=True)
         for name in modules:
-            src = BASE / target_name / "modules" / f"{name}.ko.xz"
+            src = (BASE / target.get("module_dir", target_name) / "modules"
+                   / f"{name}.ko.xz")
             (mod_dir / f"{name}.ko").write_bytes(lzma.decompress(src.read_bytes()))
 
     # Write our init script
