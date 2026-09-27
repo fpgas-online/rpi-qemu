@@ -22,7 +22,7 @@ Guiding principle (from the issue owner): *everything that works on real hardwar
    - **no host attached** — the Zero boots normally and the gadget stays unattached (no stall waiting for a host);
    - **host attached at boot** — the gadget enumerates and the console/network/storage work;
    - **host attached after boot** — attaching the USB/IP client later makes the gadget appear (hot-plug), and detaching removes it.
-4. A real Linux host can `usbip attach` the exported device and its own drivers (`cdc_acm`, `cdc_ether`/`cdc_ncm`, `usb-storage`) bind — verified locally (vhci-hcd needs root and a kernel module, which GitHub-hosted CI cannot load).
+4. A real Linux host can `usbip attach` the exported device and its own drivers (`cdc_acm`, `cdc_ether`/`cdc_ncm`, `usb-storage`) bind — verified locally with the `usbip` tool, and in CI through vhci-hcd's sysfs interface (whether GitHub's hosted runner can load `vhci-hcd` is established by the first CI run of the server PR).
 5. Host mode is unchanged: every existing boot test (raspi4b boot/socket/PXE, raspi0 with `usb-net`) keeps passing.
 
 ### Non-goals (this design)
@@ -116,9 +116,9 @@ guest (stock kernel: dwc2 gadget driver + gadget functions)
 
 ### 4.3 `usbip-server`: exporting a QEMU USB device over USB/IP
 
-- Created by `-device usbip-server,id=<id>[,host=127.0.0.1][,port=3240]`: a virtual host controller with **one port** (bus `<id>.0`); it exports whatever `USBDevice` occupies that port — the `dwc2-gadget`, or any other QEMU USB device.
+- Created by `-chardev socket,id=<chr>,host=127.0.0.1,port=3240,server=on,wait=off -device usbip-server,id=<id>,chardev=<chr>`: a virtual host controller with **one port** (bus `<id>.0`); it exports whatever `USBDevice` occupies that port — the `dwc2-gadget`, or any other QEMU USB device. The transport is a chardev, as for `usbredir`, so TCP or Unix sockets, listening address and reconnection come from QEMU's standard socket backend.
 - **Discovery/import**: answers `OP_REQ_DEVLIST` and `OP_REQ_IMPORT` with the device record (bus id, speed, VID/PID, class, configuration and interface triples). Because `vhci` never sends `SET_ADDRESS` or port reset, the server enumerates the device itself when a client imports it: port reset, `SET_ADDRESS`, then caches the device and configuration descriptors for the device record.
-- **URB traffic**: `USBIP_CMD_SUBMIT` → a `USBPacket` on the requested endpoint (control, bulk, interrupt, isochronous with its packet descriptors); completion → `USBIP_RET_SUBMIT` with actual length, status and (for IN) data. Fully asynchronous, per-endpoint ordered, many URBs in flight. `USBIP_CMD_UNLINK` → `cancel_packet`; reply `-ECONNRESET` if the URB was withdrawn (and no `RET_SUBMIT` follows), status 0 if it had already completed.
+- **URB traffic**: `USBIP_CMD_SUBMIT` → a `USBPacket` on the requested endpoint (control, bulk, interrupt, isochronous with its packet descriptors); completion → `USBIP_RET_SUBMIT` with actual length, status and (for IN) data. Fully asynchronous, per-endpoint ordered, many URBs in flight. An URB is isochronous when its `number_of_packets` is 1 or more (Linux's `vhci` sends 0 for other URBs, the protocol document `0xffffffff`); the device decides each transfer's outcome, including a stall for an endpoint absent from the current configuration or alternate setting. A NAK keeps the URB waiting (retried on the device's wakeup and every millisecond). `USBIP_CMD_UNLINK` → `cancel_packet`; reply `-ECONNRESET` if the URB was withdrawn (and no `RET_SUBMIT` follows), status 0 if it had already completed.
 - **Connection lifecycle**: one client at a time. Import = the port's device is "connected to a host" (for the gadget: session valid → VBUS/connect interrupts in the guest). TCP close or client detach = unplug (guest sees session end/disconnect); a new import re-enumerates.
 - **Errors**: malformed messages close that client connection only; the emulated device and guest are unaffected. Status codes follow Linux URB conventions (`-EPIPE` stall, `-EOVERFLOW`, `-ECONNRESET`, `-ESHUTDOWN` on disconnect).
 
@@ -126,7 +126,8 @@ guest (stock kernel: dwc2 gadget driver + gadget functions)
 
 ```
 qemu-rpi-system-aarch64 -M raspi0 ... \
-  -device usbip-server,id=usbip0,port=3240 \
+  -chardev socket,id=usbipchr,host=127.0.0.1,port=3240,server=on,wait=off \
+  -device usbip-server,id=usbip0,chardev=usbipchr \
   -device dwc2-gadget,bus=usbip0.0
 # on a Linux host:  usbip list -r 127.0.0.1 ; usbip attach -r 127.0.0.1 -b <busid>
 ```
@@ -162,7 +163,7 @@ Guest side is stock: `dtoverlay=dwc2` (with `dr_mode=peripheral` or the default 
    - composite configfs gadget with all of the above;
    - scenarios: no host, host at boot, host after boot, detach/reattach.
    Each with a negative control (the test fails on the pre-change QEMU).
-3. **Local interop** with real Linux `usbip attach` (vhci-hcd): `cdc_acm`, `cdc_ether`/`cdc_ncm`, `usb-storage` bind; documented results in the PR.
+3. **Interop with the kernel's vhci-hcd**: `run-usbip-vhci-test.py` attaches the exported device via vhci's sysfs interface (what `usbip attach` does after its import request), or with the real `usbip` tool, and checks the kernel's own drivers (`usb-storage`; with the gadget also `cdc_acm`, `cdc_ether`/`cdc_ncm`) bind and work; run locally for every PR and in CI where the runner can load `vhci-hcd`.
 4. **Host-mode regressions**: all existing boot tests (raspi4b boot/socket/PXE; raspi0 `usb-net`, SysRq, identity) must stay green with the new identity/HWCFG values.
 
 ## 9. Delivery (PR series, each reviewed and CI-green before the next)
