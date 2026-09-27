@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Build a minimal aarch64 initramfs for network testing on QEMU raspi4b."""
+"""Build a minimal Alpine initramfs for the QEMU boot tests.
 
+--target rpi4 (default): aarch64, network tests for raspi4b.
+--target rpi0: armhf (ARMv6), Pi Zero checks for raspi0.
+"""
+
+import argparse
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 BASE = Path(__file__).parent.resolve() / "test-images"
-ALPINE_TAR = BASE / "alpine-minirootfs.tar.gz"
-ROOTFS_DIR = BASE / "initramfs-root"
-OUTPUT = BASE / "test-initramfs.cpio.gz"
 
 INIT_SCRIPT = """\
 #!/bin/sh
@@ -202,7 +204,52 @@ echo "=== Network test complete ==="
 poweroff -f 2>&1 || exec /bin/sh
 """
 
+RPI0_INIT_SCRIPT = """\
+#!/bin/sh
+# Minimal init for the raspi0 (Pi Zero) boot test
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs devtmpfs /dev
+
+echo "=== QEMU raspi0 test ==="
+echo "Kernel: $(uname -r) $(uname -m)"
+echo "Cmdline: $(cat /proc/cmdline)"
+# Which tty the kernel console (and so this script's output) is bound to.
+echo "Console: $(cat /sys/class/tty/console/active)"
+if [ -c /dev/ttyS0 ]; then
+    echo "ttyS0: present"
+else
+    echo "ttyS0: MISSING"
+fi
+
+# Receive over the console UART: the harness answers READY with a line.
+echo "RX test: READY"
+line=""
+read -t 60 line
+echo "RX test: got [$line]"
+
+echo "=== raspi0 test complete ==="
+poweroff -f 2>&1 || exec /bin/sh
+"""
+
+TARGETS = {
+    "rpi4": dict(tar="alpine-minirootfs.tar.gz", root="initramfs-root",
+                 output="test-initramfs.cpio.gz", init=INIT_SCRIPT,
+                 ttys=[("ttyAMA0", 204, 64)]),
+    "rpi0": dict(tar="alpine-minirootfs-armhf.tar.gz", root="initramfs-root-rpi0",
+                 output="test-initramfs-rpi0.cpio.gz", init=RPI0_INIT_SCRIPT,
+                 ttys=[("ttyS0", 4, 64)]),
+}
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", choices=sorted(TARGETS), default="rpi4")
+    target = TARGETS[parser.parse_args().target]
+    ALPINE_TAR = BASE / target["tar"]
+    ROOTFS_DIR = BASE / target["root"]
+    OUTPUT = BASE / target["output"]
+
     # Clean and extract Alpine rootfs
     if ROOTFS_DIR.exists():
         subprocess.run(["rm", "-rf", str(ROOTFS_DIR)])
@@ -217,11 +264,13 @@ def main():
     # Create device nodes needed before devtmpfs mount
     os.mknod(str(ROOTFS_DIR / "dev" / "console"), 0o600 | 0o020000, os.makedev(5, 1))
     os.mknod(str(ROOTFS_DIR / "dev" / "null"), 0o666 | 0o020000, os.makedev(1, 3))
-    os.mknod(str(ROOTFS_DIR / "dev" / "ttyAMA0"), 0o600 | 0o020000, os.makedev(204, 64))
+    for name, major, minor in target["ttys"]:
+        os.mknod(str(ROOTFS_DIR / "dev" / name), 0o600 | 0o020000,
+                 os.makedev(major, minor))
 
     # Write our init script
     init_path = ROOTFS_DIR / "init"
-    init_path.write_text(INIT_SCRIPT)
+    init_path.write_text(target["init"])
     os.chmod(str(init_path), 0o755)
 
     # Also symlink /sbin/init to our init for safety

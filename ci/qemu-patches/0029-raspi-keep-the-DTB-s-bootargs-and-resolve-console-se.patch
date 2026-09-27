@@ -1,0 +1,146 @@
+From 81608485aae9b3dff87c16aca24a575bf67fc3fd Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 19:14:05 +0930
+Subject: [PATCH] raspi: keep the DTB's bootargs and resolve console=serial<n>
+
+With its pins routed, the Zero W's mini UART still failed to probe
+("error -EINVAL: unable to register 8250 port"), and once it did probe the
+console stayed silent after early boot.  Both are kernel command line
+differences from real hardware:
+
+- The firmware hands the kernel the DTB's own /chosen/bootargs followed by
+  cmdline.txt.  Raspberry Pi DTBs carry options there that RPi kernels
+  rely on -- the Zero W's is "coherent_pool=1M 8250.nr_uarts=1
+  snd_bcm2835.enable_headphones=0 cgroup_disable=memory" -- but QEMU's
+  -append replaces them.  RPi kernels are built with
+  CONFIG_SERIAL_8250_RUNTIME_UARTS=0, so without 8250.nr_uarts the 8250
+  core registers no ports at all ("Serial: 8250/16550 driver, N ports"
+  never appears) and the mini UART's registration fails.
+- Linux has no "serial<n>" console, so RPi OS's console=serial0,115200
+  (which the firmware resolves) bound nothing.
+
+In the modify_dtb hook, when -append replaced the DTB's bootargs, put the
+DTB file's own bootargs back in front of it, and rewrite console=serial<n>
+to the tty that DT alias names: ttyS<n> for the mini UART, ttyAMA<n> for a
+PL011 (both drivers number their ports by DT alias, so on the Zero W the
+PL011 is ttyAMA1).  Only whole console=serial<n> arguments followed by ',',
+whitespace or the end are rewritten; everything else, whitespace included,
+is passed through unchanged.
+
+Confirmed the cause first: booting with 8250.nr_uarts=4 on the command
+line alone made the port register.  With the stock Zero W DTB and
+console=serial0,115200: "Kernel command line: coherent_pool=1M
+8250.nr_uarts=1 snd_bcm2835.enable_headphones=0 cgroup_disable=memory
+console=ttyS0,115200 ...", "ttyS0 at MMIO 0x20215040 (irq = 53,
+base_baud = 43750000) is a 16550", "printk: legacy console [ttyS0]
+enabled".  Without -append the DTB's bootargs are left as they are.
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/28
+---
+ hw/arm/raspi.c | 80 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 80 insertions(+)
+
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index b100895..ac39f43 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -26,6 +26,8 @@
+ #include "hw/core/loader.h"
+ #include "hw/arm/machines-qom.h"
+ #include "qom/object.h"
++#include "system/device_tree.h"
++#include "qemu/datadir.h"
+ #include <libfdt.h>
+ 
+ #define TYPE_RASPI_MACHINE  MACHINE_TYPE_NAME("raspi-common")
+@@ -284,9 +286,87 @@ static void raspi_fixup_serial0_pins(void *fdt)
+     }
+ }
+ 
++/* The DTB file's own /chosen/bootargs, or NULL. */
++static char *raspi_dtb_file_bootargs(const char *dtb_filename)
++{
++    g_autofree char *path = qemu_find_file(QEMU_FILE_TYPE_DTB, dtb_filename);
++    g_autofree void *fdt = NULL;
++    const char *args;
++    int size, chosen;
++
++    fdt = path ? load_device_tree(path, &size) : NULL;
++    if (!fdt) {
++        return NULL;
++    }
++    chosen = fdt_path_offset(fdt, "/chosen");
++    args = chosen < 0 ? NULL : fdt_getprop(fdt, chosen, "bootargs", NULL);
++    return g_strdup(args);
++}
++
++/*
++ * The firmware hands the kernel the DTB's own /chosen/bootargs followed by
++ * cmdline.txt.  Raspberry Pi DTBs carry options there that RPi kernels rely
++ * on -- the Zero W's has "coherent_pool=1M 8250.nr_uarts=1 ...", and RPi
++ * kernels are built with CONFIG_SERIAL_8250_RUNTIME_UARTS=0, so without
++ * 8250.nr_uarts the 8250 core registers no ports and the mini UART fails to
++ * probe -- but -append replaces them, so put them back in front of it.
++ *
++ * It also rewrites console=serial<n>, as in RPi OS's cmdline.txt, to the tty
++ * that DT alias names, since Linux has no "serial<n>" console: ttyS<n> for
++ * the mini UART, ttyAMA<n> for a PL011 (both drivers number their ports by
++ * DT alias).  Everything else is passed through unchanged.
++ */
++static void raspi_fixup_cmdline(const struct arm_boot_info *info, void *fdt)
++{
++    static const char console[] = "console=serial";
++    g_autoptr(GString) out = g_string_new(NULL);
++    g_autofree char *dtb_args = NULL;
++    const char *bootargs, *p;
++    int chosen;
++
++    chosen = fdt_path_offset(fdt, "/chosen");
++    bootargs = chosen < 0 ? NULL : fdt_getprop(fdt, chosen, "bootargs", NULL);
++    if (!bootargs) {
++        return;
++    }
++
++    /* boot.c only replaces the DTB's bootargs when -append is non-empty. */
++    if (info->kernel_cmdline && *info->kernel_cmdline && info->dtb_filename) {
++        dtb_args = raspi_dtb_file_bootargs(info->dtb_filename);
++        if (dtb_args && *dtb_args) {
++            g_string_append_printf(out, "%s ", dtb_args);
++        }
++    }
++
++    for (p = bootargs; *p; ) {
++        const char *tail;
++        unsigned long n;
++        RaspiUartKind kind;
++
++        if ((p == bootargs || g_ascii_isspace(p[-1])) &&
++            g_str_has_prefix(p, console) &&
++            g_ascii_isdigit(p[strlen(console)]) &&
++            qemu_strtoul(p + strlen(console), &tail, 10, &n) == 0 &&
++            (*tail == '\0' || *tail == ',' || g_ascii_isspace(*tail)) &&
++            raspi_serial_alias(fdt, n, &kind) >= 0 && kind != RPI_UART_NONE) {
++            g_string_append_printf(out, "console=%s%lu",
++                                   kind == RPI_UART_MINI ? "ttyS" : "ttyAMA",
++                                   n);
++            p = tail;
++        } else {
++            g_string_append_c(out, *p++);
++        }
++    }
++
++    if (fdt_setprop_string(fdt, chosen, "bootargs", out->str) < 0) {
++        warn_report("raspi: could not update /chosen/bootargs in the DTB");
++    }
++}
++
+ static void raspi_modify_dtb(const struct arm_boot_info *info, void *fdt)
+ {
+     raspi_fixup_serial0_pins(fdt);
++    raspi_fixup_cmdline(info, fdt);
+ }
+ 
+ static void setup_boot(MachineState *machine, ARMCPU *cpu,
+-- 
+2.47.3
+

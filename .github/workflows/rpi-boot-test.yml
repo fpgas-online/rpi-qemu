@@ -191,6 +191,35 @@ jobs:
           echo "=== Running socket networking test with peer ==="
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi-socket-network-test.py
 
+      # Pinned raspberrypi/firmware commit (kernel 6.18.52+) so the log
+      # checks see the same kernel on a cache hit and a miss.
+      - name: Cache RPi Zero kernel
+        id: cache-rpi0-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            test-images/rpi0/kernel.img
+            test-images/rpi0/bcm2708-rpi-zero-w.dtb
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2
+
+      - name: Download RPi Zero kernel and DTB
+        if: steps.cache-rpi0-kernel.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p test-images/rpi0
+          FW_BASE="https://raw.githubusercontent.com/raspberrypi/firmware/bead686816848038563a542dc854346ab13253a2/boot"
+          wget -q -O test-images/rpi0/kernel.img "$FW_BASE/kernel.img"
+          wget -q -O test-images/rpi0/bcm2708-rpi-zero-w.dtb "$FW_BASE/bcm2708-rpi-zero-w.dtb"
+
+      - name: Download Alpine armhf and build RPi Zero initramfs
+        run: |
+          wget -q -O test-images/alpine-minirootfs-armhf.tar.gz \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/armhf/alpine-minirootfs-3.21.3-armhf.tar.gz"
+          python3 build-initramfs.py --target rpi0
+
+      - name: Run RPi Zero (raspi0) boot test
+        run: |
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi0-boot-test.py
+
       - name: Download PXE boot firmware (this run)
         if: env.QEMU_SOURCE == 'artifact'
         uses: actions/download-artifact@v4

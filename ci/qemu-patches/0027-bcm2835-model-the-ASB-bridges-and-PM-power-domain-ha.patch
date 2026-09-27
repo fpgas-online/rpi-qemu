@@ -1,0 +1,266 @@
+From 732d6f7bcae966d1d4c5f3b5a515929d67af3612 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 19:14:05 +0930
+Subject: [PATCH] bcm2835: model the ASB bridges and PM power-domain handshake
+
+Raspberry Pi device trees give the "pm" node (brcm,bcm2835-pm) a second
+register range, "asb" at 0x7e00a000: the AXI async bridge control block.
+On BCM2835-family machines (raspi0/1ap/2b/3ap/3b) nothing was mapped
+there, so the first access -- bcm2835_power_probe() reading
+ASB_AXI_BRDG_ID -- took an external abort.  It runs on the deferred probe
+worker, which died with IRQs disabled; nothing probed after it, so the SD
+card never appeared and Raspberry Pi OS never reached userspace
+(rpi-qemu#27: "Unhandled fault: external abort on non-linefetch (0x008)
+at 0xdc971020 ... PC is at bcm2835_power_probe+0x64").  BCM2838 already
+maps a read-as-zero stub there, so the probe fails cleanly with -ENODEV.
+
+A zero stub would stop the abort but leave the driver refusing to load,
+so model what bcm2835-power actually needs, as the power manager whose DT
+node owns the range (a second MMIO region of bcm2835-powermgt, mapped at
+BRDG_OFFSET for the BCM2835 family only; BCM2838 keeps its stub):
+- AXI_BRDG_ID reads "BRDG" (0x62726467);
+- each bridge *_CTRL register's ACK follows REQ_STOP, which the driver
+  sets/clears and then polls ACK for when stopping/starting a bridge;
+- PM_IMAGE/PM_GRAFX report POWOK as soon as POWUP is set and MRDONE as
+  soon as MEMREP is, the power-on handshake it polls for;
+- the other PM registers (USB/DSI/HDMI control, ...) read back what was
+  written instead of reading as zero.
+
+The PM register changes apply to every machine using bcm2835-powermgt,
+raspi4b included; there bcm2835-power still stops at the ASB ID check
+(BCM2838's stub reads 0), so nothing exercises them.
+
+With the stock 2026-09-15 RPi OS trixie armhf lite image (kernel
+6.18.50+rpt-rpi-v6) on -M raspi0: "bcm2835-power: Broadcom BCM2835 power
+domains driver", "genpd: Disabling unused power domains", the SD card
+enumerates (mmcblk0: p1 p2), the root fs mounts and systemd starts.
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/27
+---
+ hw/arm/bcm2835_peripherals.c       |  8 +++
+ hw/misc/bcm2835_powermgt.c         | 98 +++++++++++++++++++++++++++---
+ include/hw/arm/raspi_platform.h    |  2 +-
+ include/hw/misc/bcm2835_powermgt.h |  9 +++
+ 4 files changed, 107 insertions(+), 10 deletions(-)
+
+diff --git a/hw/arm/bcm2835_peripherals.c b/hw/arm/bcm2835_peripherals.c
+index 558c180..289a1d3 100644
+--- a/hw/arm/bcm2835_peripherals.c
++++ b/hw/arm/bcm2835_peripherals.c
+@@ -218,6 +218,14 @@ static void bcm2835_peripherals_realize(DeviceState *dev, Error **errp)
+                               BCM2835_IC_GPU_IRQ,
+                               INTERRUPT_DMA0 + SEPARATE_DMA_IRQ_MAX + 1));
+ 
++    /*
++     * ASB (AXI async bridge) registers, modelled by the power manager whose
++     * DT node ("pm") they belong to.  BCM2838 maps its own stub here.
++     */
++    memory_region_add_subregion(
++        &s_base->peri_mr, BRDG_OFFSET,
++        sysbus_mmio_get_region(SYS_BUS_DEVICE(&s_base->powermgt), 1));
++
+     /* Random Number Generator */
+     if (!sysbus_realize(SYS_BUS_DEVICE(&s->rng), errp)) {
+         return;
+diff --git a/hw/misc/bcm2835_powermgt.c b/hw/misc/bcm2835_powermgt.c
+index 3771804..8b6b651 100644
+--- a/hw/misc/bcm2835_powermgt.c
++++ b/hw/misc/bcm2835_powermgt.c
+@@ -27,6 +27,31 @@
+ #define V_WDOG_TIME_SET 0x000fffff
+ #define WDOG_TICKS_PER_SEC 65536
+ 
++/*
++ * Power domain registers.  Powering a domain on, Linux's bcm2835-power
++ * driver sets POWUP and polls for POWOK, then sets MEMREP and polls for
++ * MRDONE; there is no power switch or memory to repair here, so both
++ * complete as soon as they are requested.
++ */
++#define R_PM_IMAGE 0x108
++#define R_PM_GRAFX 0x10c
++#define PM_POWUP   BIT(0)
++#define PM_POWOK   BIT(1)
++#define PM_MEMREP  BIT(3)
++#define PM_MRDONE  BIT(4)
++
++/*
++ * ASB (AXI async bridge) registers, the second "asb" range of the DT's pm
++ * node.  bcm2835-power refuses to probe unless AXI_BRDG_ID reads "BRDG",
++ * and it stops/starts a bridge by setting/clearing REQ_STOP in one of the
++ * *_CTRL registers, then polling for ACK to follow it.
++ */
++#define R_ASB_CTRL_LAST    0x1c
++#define R_ASB_AXI_BRDG_ID  0x20
++#define V_ASB_BRDG_ID      0x62726467 /* "BRDG" */
++#define ASB_REQ_STOP       BIT(0)
++#define ASB_ACK            BIT(1)
++
+ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
+                                       unsigned size)
+ {
+@@ -45,10 +70,7 @@ static uint64_t bcm2835_powermgt_read(void *opaque, hwaddr offset,
+         break;
+ 
+     default:
+-        qemu_log_mask(LOG_UNIMP,
+-                      "bcm2835_powermgt_read: Unknown offset 0x%08"HWADDR_PRIx
+-                      "\n", offset);
+-        res = 0;
++        res = s->regs[offset / 4];
+         break;
+     }
+ 
+@@ -128,14 +150,55 @@ static void bcm2835_powermgt_write(void *opaque, hwaddr offset,
+         }
+         break;
+ 
++    case R_PM_IMAGE:
++    case R_PM_GRAFX:
++        value &= ~(PM_POWOK | PM_MRDONE);
++        if (value & PM_POWUP) {
++            value |= PM_POWOK;
++        }
++        if (value & PM_MEMREP) {
++            value |= PM_MRDONE;
++        }
++        s->regs[offset / 4] = value;
++        break;
++
+     default:
+-        qemu_log_mask(LOG_UNIMP,
+-                      "bcm2835_powermgt_write: Unknown offset 0x%08"HWADDR_PRIx
+-                      "\n", offset);
++        s->regs[offset / 4] = value;
+         break;
+     }
+ }
+ 
++static uint64_t bcm2835_asb_read(void *opaque, hwaddr offset, unsigned size)
++{
++    BCM2835PowerMgtState *s = (BCM2835PowerMgtState *)opaque;
++
++    if (offset == R_ASB_AXI_BRDG_ID) {
++        return V_ASB_BRDG_ID;
++    }
++    return s->asb_regs[offset / 4];
++}
++
++static void bcm2835_asb_write(void *opaque, hwaddr offset, uint64_t value,
++                              unsigned size)
++{
++    BCM2835PowerMgtState *s = (BCM2835PowerMgtState *)opaque;
++
++    if (offset > R_ASB_CTRL_LAST) {
++        qemu_log_mask(LOG_GUEST_ERROR,
++                      "bcm2835_asb_write: read-only offset 0x%02"HWADDR_PRIx
++                      "\n", offset);
++        return;
++    }
++
++    /* Linux writes these with the PM password; only REQ_STOP is state. */
++    value &= ASB_REQ_STOP;
++    /* The bridge acknowledges a stop (and a restart) immediately. */
++    if (value & ASB_REQ_STOP) {
++        value |= ASB_ACK;
++    }
++    s->asb_regs[offset / 4] = value;
++}
++
+ static const MemoryRegionOps bcm2835_powermgt_ops = {
+     .read = bcm2835_powermgt_read,
+     .write = bcm2835_powermgt_write,
+@@ -144,15 +207,27 @@ static const MemoryRegionOps bcm2835_powermgt_ops = {
+     .impl.max_access_size = 4,
+ };
+ 
++static const MemoryRegionOps bcm2835_asb_ops = {
++    .read = bcm2835_asb_read,
++    .write = bcm2835_asb_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .impl.min_access_size = 4,
++    .impl.max_access_size = 4,
++};
++
+ static const VMStateDescription vmstate_bcm2835_powermgt = {
+     .name = TYPE_BCM2835_POWERMGT,
+-    .version_id = 2,
++    .version_id = 3,
+     .minimum_version_id = 1,
+     .fields = (const VMStateField[]) {
+         VMSTATE_UINT32(rstc, BCM2835PowerMgtState),
+         VMSTATE_UINT32(rsts, BCM2835PowerMgtState),
+         VMSTATE_UINT32(wdog, BCM2835PowerMgtState),
+         VMSTATE_TIMER_V(wdt_timer, BCM2835PowerMgtState, 2),
++        VMSTATE_UINT32_ARRAY_V(regs, BCM2835PowerMgtState,
++                               BCM2835_PM_SIZE / 4, 3),
++        VMSTATE_UINT32_ARRAY_V(asb_regs, BCM2835PowerMgtState,
++                               BCM2835_ASB_SIZE / 4, 3),
+         VMSTATE_END_OF_LIST()
+     }
+ };
+@@ -162,8 +237,11 @@ static void bcm2835_powermgt_init(Object *obj)
+     BCM2835PowerMgtState *s = BCM2835_POWERMGT(obj);
+ 
+     memory_region_init_io(&s->iomem, obj, &bcm2835_powermgt_ops, s,
+-                          TYPE_BCM2835_POWERMGT, 0x200);
++                          TYPE_BCM2835_POWERMGT, BCM2835_PM_SIZE);
+     sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->iomem);
++    memory_region_init_io(&s->asb_iomem, obj, &bcm2835_asb_ops, s,
++                          "bcm2835-asb", BCM2835_ASB_SIZE);
++    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->asb_iomem);
+     timer_init_ns(&s->wdt_timer, QEMU_CLOCK_VIRTUAL,
+                   bcm2835_powermgt_wdt_expired, s);
+ }
+@@ -176,6 +254,8 @@ static void bcm2835_powermgt_reset(DeviceState *dev)
+     s->rstc = 0x00000102;
+     s->rsts = 0x00001000;
+     s->wdog = 0x00000000;
++    memset(s->regs, 0, sizeof(s->regs));
++    memset(s->asb_regs, 0, sizeof(s->asb_regs));
+     timer_del(&s->wdt_timer);
+ }
+ 
+diff --git a/include/hw/arm/raspi_platform.h b/include/hw/arm/raspi_platform.h
+index c52b9e2..99537d8 100644
+--- a/include/hw/arm/raspi_platform.h
++++ b/include/hw/arm/raspi_platform.h
+@@ -73,7 +73,7 @@ uint64_t board_ram_size(uint32_t board_rev);
+ #define MPHI_OFFSET             0x6000   /* Message-based Parallel Host Intf. */
+ #define DMA_OFFSET              0x7000   /* DMA controller, channels 0-14 */
+ #define ARBA_OFFSET             0x9000
+-#define BRDG_OFFSET             0xa000   /* RPiVid ASB for BCM2838 (BCM2711) */
++#define BRDG_OFFSET             0xa000   /* ASB (AXI async bridges) */
+ #define ARM_OFFSET              0xB000   /* ARM control block */
+ #define ARMCTRL_OFFSET          (ARM_OFFSET + 0x000)
+ #define ARMCTRL_IC_OFFSET       (ARM_OFFSET + 0x200) /* Interrupt controller */
+diff --git a/include/hw/misc/bcm2835_powermgt.h b/include/hw/misc/bcm2835_powermgt.h
+index 72b2df6..6df95fb 100644
+--- a/include/hw/misc/bcm2835_powermgt.h
++++ b/include/hw/misc/bcm2835_powermgt.h
+@@ -18,14 +18,23 @@
+ #define TYPE_BCM2835_POWERMGT "bcm2835-powermgt"
+ OBJECT_DECLARE_SIMPLE_TYPE(BCM2835PowerMgtState, BCM2835_POWERMGT)
+ 
++#define BCM2835_PM_SIZE      0x200
++#define BCM2835_ASB_SIZE     0x24
++
+ struct BCM2835PowerMgtState {
+     SysBusDevice busdev;
+     MemoryRegion iomem;
++    MemoryRegion asb_iomem;
+ 
+     uint32_t rstc;
+     uint32_t rsts;
+     uint32_t wdog;
+     QEMUTimer wdt_timer;
++
++    /* Other PM registers (power domains, USB/DSI/HDMI control, ...) */
++    uint32_t regs[BCM2835_PM_SIZE / 4];
++    /* ASB (AXI async bridge) control registers, 0x00..0x1c */
++    uint32_t asb_regs[BCM2835_ASB_SIZE / 4];
+ };
+ 
+ #endif
+-- 
+2.47.3
+
