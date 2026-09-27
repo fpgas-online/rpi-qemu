@@ -242,6 +242,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y "linux-modules-extra-$(uname -r)"
           sudo modprobe vhci-hcd
+          sudo modprobe usb-storage
           ls /sys/devices/platform/vhci_hcd.0
 
       - name: Run USB/IP interop test
@@ -333,7 +334,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [build-debs, build-static, build-pxeboot, boot-test]
+    needs: [build-debs, build-static, build-pxeboot, boot-test, usbip-interop]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
