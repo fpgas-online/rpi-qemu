@@ -1,0 +1,31 @@
+#!/usr/bin/make -f
+# U-Boot for QEMU's raspi4b, cross-compiled for aarch64. ci/prepare-source.py
+# fetches U-Boot at its upstreams.toml pin, applies ci/uboot-patches/, and
+# puts the defconfig and the VideoCore boot environment in place.
+
+# dpkg-buildpackage exports the Debian build flags, which are for the build
+# machine: U-Boot's Kbuild would pass them to the aarch64 firmware build.
+unexport CFLAGS CPPFLAGS CXXFLAGS LDFLAGS
+
+NUMJOBS := $(or $(patsubst parallel=%,%,$(filter parallel=%,${DEB_BUILD_OPTIONS})),$(shell nproc))
+UBOOT = $(MAKE) -j$(NUMJOBS) CROSS_COMPILE=aarch64-linux-gnu-
+DEST = debian/qemu-rpi-pxeboot/usr/share/qemu-rpi-pxeboot
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	$(UBOOT) rpi_4_qemu_pxeboot_defconfig
+
+override_dh_auto_build:
+	$(UBOOT)
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	install -D -m0644 u-boot.bin $(DEST)/rpi4b-pxeboot.bin
+	install -D -m0644 arch/arm/dts/bcm2711-rpi-4-b.dtb $(DEST)/rpi4b-pxeboot.dtb
+
+# A fresh tree every build; U-Boot's own clean would remove the defconfig
+# prepare-source.py put in place.
+override_dh_auto_clean:
