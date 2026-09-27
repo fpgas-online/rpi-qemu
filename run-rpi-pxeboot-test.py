@@ -254,7 +254,7 @@ def run_test():
     for line in text.split("\n"):
         s = line.strip()
         for kw in ["Raspberry Pi Bootloader", "Board serial",
-                    "DHCP client bound", "Loading.*kernel8",
+                    "DHCP client bound", "kernel8.img",
                     "Decompressed kernel", "Starting kernel",
                     "Booting Linux",
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
