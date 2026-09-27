@@ -1,0 +1,11 @@
+# How this repository is packaged, and why it differs from the defaults.
+# See https://github.com/mithro/apt-repo-action/blob/main/docs/packaging.md
+
+kind = "B"                  # our own patches and build, on main
+variant = "patch-series"    # QEMU and U-Boot are fetched at the pins in upstreams.toml
+architectures = ["amd64", "arm64", "riscv64"]
+suites = "default"          # trixie, forky, sid (no raspbian-*: no armhf)
+
+[exceptions]
+PKG-ARCH = "QEMU 11 supports no 32-bit host (qemu.org, removed features: \"32-bit host operating systems (removed in 11.0)\"), so no i386, armhf or raspbian-* build"
+PKG-VERSION = "epoch 2: recovers from an earlier version scheme"
