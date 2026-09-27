@@ -1,7 +1,7 @@
 # DWC2 USB gadget mode for the emulated Raspberry Pi Zero, exported over USB/IP
 
 - **Date:** 2026-09-27
-- **Status:** design, awaiting review
+- **Status:** implemented — #34 (identity values), #35 (usbip-server), #36 (device mode + `dwc2-gadget`), #37 (isochronous), #38 (vhci-hcd interop, docs)
 - **Issue:** [#22](https://github.com/fpgas-online/rpi-qemu/issues/22) — raspi0: DWC2 device/OTG mode absent, so a USB gadget serial console cannot be boot-tested
 
 ## 1. Goal
@@ -174,7 +174,21 @@ Guest side is stock: `dtoverlay=dwc2` (with `dr_mode=peripheral` or the default 
 4. Isochronous endpoints (+ a UAC/UVC-class gadget test).
 5. Docs (README raspi0 gadget section) and closing #22.
 
-## 10. Open items
+## 10. As built
 
-- Reset-value sample from a bare `dtoverlay=dwc2` Zero (`rpiz-new-f2db2f`) to confirm device-mode reset defaults.
-- Host-role USB/IP client (Renode/`usbipd` interop in the other direction) — separate spec after this one.
+Decisions made during implementation, beyond §4:
+
+- `usbip-server` is a **sysbus device** (no MMIO, no IRQ), allowed as a dynamic sysbus device on the `raspi*` machines and `-M none`: a bus-less device works, but `-device ...,bus=` only finds buses in the sysbus tree.
+- `USBBus.no_auto_hub`: QEMU chains a `usb-hub` onto a bus's last free port, which on the server's one-port bus would export the hub instead of the device.
+- **VBUS** is a USB core addition (`usb_port_set_vbus()`, `USBDeviceClass.vbus_changed`) rather than a private server/gadget interface: any host controller may model it; ports are powered by default.
+- **USB reset timing** matters to the stock driver: `USBRst`, `EnumDone` after T_DRST (10 ms), the first SETUP only after T_RSTRCY (10 ms) — the driver re-initialises EP0 in its reset and enumeration handlers. Reset signalling on a suspended bus raises `WkUpInt`, which brings the driver back from its disconnected (L3) state after a detach.
+- **`DPTXFSIZn` reset values** are the BCM2835's per-FIFO maxima, 512 words for FIFOs 1–5 and 768 for 6–7 (BCM2835 datasheet, as quoted on linux-rpi-kernel, May 2017); the driver refuses endpoints without them ("No suitable fifo found").
+- **Isochronous** packets are paced one per (micro)frame by the server, and each endpoint's schedule continues across URBs; the gadget raises `NAKIntrpt`/`OUTTknEPdis` for tokens to an idle ISO endpoint, from which the driver starts its stream. Tested at 1 ms intervals: at one microframe the emulated ARM11 cannot re-arm in time, and the driver then drops frames as on silicon.
+- **Interop in CI** uses usbfs on the runner kernel (which has `vhci-hcd` but no `usb-storage` or `cdc_acm`): the kernel's USB core enumerates the device and usbfs issues real kernel URBs through vhci-hcd.
+
+## 11. Open items
+
+- Confirm the `DPTXFSIZn` reset values against a register read of a host-mode Zero (requested; blocked on SSH access to the fleet).
+- `URB_ZERO_PACKET` from USB/IP clients is not turned into a trailing zero-length packet; Linux's `cdc_acm`, `cdc_ether` and `cdc_ncm` do not set it (they pad), so no tested function depends on it.
+- Local run of Linux's own class drivers (`cdc_acm`, `cdc_ether`/`cdc_ncm`, `usb-storage`) binding the gadget through `usbip attach` — needs `vhci-hcd` loaded on a machine that has them.
+- Host-role USB/IP client (Renode/`usbipd` interop in the other direction) — separate spec.
