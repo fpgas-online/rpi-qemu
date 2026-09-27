@@ -1,4 +1,4 @@
-From 8e2c4f9a1b553fd2567c48862c59fe989debdcec Mon Sep 17 00:00:00 2001
+From 69280a1680f1ce9253a2baf95e52e6dfa038a4c5 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1085 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1104 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1264 insertions(+), 25 deletions(-)
+ 5 files changed, 1283 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..a784a00
+index 0000000..b1d3873
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1085 @@
+@@ -0,0 +1,1104 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -425,13 +425,12 @@ index 0000000..a784a00
 +}
 +
 +/*
-+ * OUT: move packets of @data (@len bytes, from @off) into the guest's armed
-+ * transfer.  Returns the bytes moved; *host_done is set when all of the
-+ * host's data has been delivered.
++ * OUT: move packets of the host's data (@remaining bytes left, the first
++ * of them at @data) into the guest's armed transfer.  Returns the bytes
++ * moved; *host_done is set when all of the host's data has been delivered.
 + */
 +static uint32_t dwc2_ep_out_packets(DWC2State *s, int n, const uint8_t *data,
-+                                    uint32_t len, uint32_t off,
-+                                    bool *host_done)
++                                    uint32_t remaining, bool *host_done)
 +{
 +    uint32_t *ep = dwc2_ep(s, n, false);
 +    uint32_t mps = dwc2_ep_mps(s, n, false);
@@ -445,7 +444,7 @@ index 0000000..a784a00
 +    }
 +    dwc2_tsiz_get(s, n, false, &xfer, &pkt);
 +    while (pkt > 0) {
-+        uint32_t chunk = MIN(mps, len - off - moved);
++        uint32_t chunk = MIN(mps, remaining - moved);
 +
 +        if (chunk > xfer) {
 +            qemu_log_mask(LOG_GUEST_ERROR,
@@ -453,7 +452,7 @@ index 0000000..a784a00
 +                          "%u left in the transfer\n", n, chunk, xfer);
 +            chunk = xfer;
 +        }
-+        if (!dwc2_ep_dma(s, n, false, (uint8_t *)data + off + moved, chunk)) {
++        if (!dwc2_ep_dma(s, n, false, (uint8_t *)data + moved, chunk)) {
 +            return moved;
 +        }
 +        moved += chunk;
@@ -462,8 +461,8 @@ index 0000000..a784a00
 +        if (chunk < mps) {
 +            short_pkt = true;
 +        }
-+        if (short_pkt || off + moved == len) {
-+            *host_done = off + moved == len;
++        if (short_pkt || moved == remaining) {
++            *host_done = moved == remaining;
 +            break;
 +        }
 +    }
@@ -563,8 +562,9 @@ index 0000000..a784a00
 +        break;
 +    }
 +    case DWC2_CTRL_DATA_OUT:
-+        g->ctrl_done += dwc2_ep_out_packets(s, 0, dev->data_buf, g->ctrl_len,
-+                                            g->ctrl_done, &done);
++        g->ctrl_done += dwc2_ep_out_packets(s, 0,
++                                            dev->data_buf + g->ctrl_done,
++                                            g->ctrl_len - g->ctrl_done, &done);
 +        if (done) {
 +            g->ctrl_phase = DWC2_CTRL_STATUS_IN;
 +        }
@@ -579,7 +579,7 @@ index 0000000..a784a00
 +        break;
 +    }
 +    case DWC2_CTRL_STATUS_OUT:
-+        dwc2_ep_out_packets(s, 0, NULL, 0, 0, &done);
++        dwc2_ep_out_packets(s, 0, NULL, 0, &done);
 +        if (done) {
 +            dwc2_ctrl_complete(g, USB_RET_SUCCESS);
 +        }
@@ -595,21 +595,33 @@ index 0000000..a784a00
 + * Returns true if the host's packet on endpoint @n is finished (its status
 + * set); the caller completes it.
 + */
++/* Whether a transfer is armed on the endpoint (and not NAKing). */
++static bool dwc2_ep_armed(DWC2State *s, int n, bool in)
++{
++    uint32_t ctl = dwc2_ep(s, n, in)[DEP_CTL];
++
++    return (ctl & DXEPCTL_EPENA) && !(ctl & DXEPCTL_NAKSTS);
++}
++
 +static bool dwc2_ep_in_run(DWC2GadgetState *g, int n)
 +{
 +    DWC2State *s = g->dwc2;
 +    USBPacket *p = g->in_p[n];
 +    uint32_t *ep = s->iepreg[n];
 +    g_autofree uint8_t *buf = NULL;
-+    uint32_t room, moved;
++    uint32_t room, moved, xfer, pkt;
 +    bool done, babble;
 +
 +    if (ep[DEP_CTL] & DXEPCTL_STALL) {
 +        p->status = USB_RET_STALL;
 +        return true;
 +    }
++    if (!dwc2_ep_armed(s, n, true)) {
++        return false;
++    }
 +    room = p->iov.size - p->actual_length;
-+    buf = g_malloc(MAX(room, 1));
++    dwc2_tsiz_get(s, n, true, &xfer, &pkt);
++    buf = g_malloc(MAX(MIN(room, xfer), 1));    /* at most xfer is sent */
 +    moved = dwc2_ep_in_packets(s, n, buf, room, &done, &babble);
 +    usb_packet_copy(p, buf, moved);
 +    if (babble) {
@@ -624,15 +636,22 @@ index 0000000..a784a00
 +    USBPacket *p = g->out_p[n];
 +    g_autofree uint8_t *data = NULL;
 +    size_t len = p->iov.size;
++    uint32_t window, xfer, pkt;
 +    bool done;
 +
 +    if (s->oepreg[n][DEP_CTL] & DXEPCTL_STALL) {
 +        p->status = USB_RET_STALL;
 +        return true;
 +    }
-+    data = g_malloc(MAX(len, 1));
-+    iov_to_buf(p->iov.iov, p->iov.niov, 0, data, len);
-+    g->out_off[n] += dwc2_ep_out_packets(s, n, data, len, g->out_off[n],
++    if (!dwc2_ep_armed(s, n, false)) {
++        return false;
++    }
++    /* only as much of the host's data as the armed transfer can take */
++    dwc2_tsiz_get(s, n, false, &xfer, &pkt);
++    window = MIN(len - g->out_off[n], xfer);
++    data = g_malloc(MAX(window, 1));
++    iov_to_buf(p->iov.iov, p->iov.niov, g->out_off[n], data, window);
++    g->out_off[n] += dwc2_ep_out_packets(s, n, data, len - g->out_off[n],
 +                                         &done);
 +    if (done) {
 +        p->actual_length = len;
@@ -992,7 +1011,7 @@ index 0000000..a784a00
 +            s->oepreg[n][DEP_INT] |= DXEPINT_OUTTKNEPDIS;
 +        }
 +        iov_to_buf(p->iov.iov, p->iov.niov, 0, buf, p->iov.size);
-+        moved = dwc2_ep_out_packets(s, n, buf, p->iov.size, 0, &done);
++        moved = dwc2_ep_out_packets(s, n, buf, p->iov.size, &done);
 +        p->actual_length = moved;
 +        p->status = done ? USB_RET_SUCCESS : USB_RET_NAK;
 +    }
