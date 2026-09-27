@@ -203,7 +203,7 @@ jobs:
             test-images/rpi0/disable-bt.dtbo
             test-images/rpi0/dwc2.dtbo
             test-images/rpi0/modules
-          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget-sslb
 
       - name: Download RPi Zero kernel and DTB
         if: steps.cache-rpi0-kernel.outputs.cache-hit != 'true'
@@ -225,7 +225,8 @@ jobs:
           for p in roles/roles dwc2/dwc2 gadget/libcomposite \
                    gadget/function/u_serial gadget/function/usb_f_acm \
                    gadget/function/u_ether gadget/function/usb_f_ecm \
-                   gadget/function/usb_f_ncm gadget/function/usb_f_mass_storage; do
+                   gadget/function/usb_f_ncm gadget/function/usb_f_mass_storage \
+                   gadget/function/usb_f_ss_lb; do
             wget -q -O "test-images/rpi0/modules/$(basename $p).ko.xz" "$K/$p.ko.xz"
           done
 
