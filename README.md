@@ -110,6 +110,34 @@ qemu-rpi-system-aarch64 -M raspi0 \
 - **Magic SysRq over serial.** The mini UART has no break detection (BCM2835 ARM Peripherals, 2.2), so a BREAK never reaches SysRq on `ttyS0` -- on hardware or here. Use the PL011 as the console, as `dtoverlay=disable-bt` does on a real Zero W: apply the overlay to the DTB (`fdtoverlay -i bcm2708-rpi-zero-w.dtb -o zero-w-disable-bt.dtb overlays/disable-bt.dtbo`), boot with that DTB and swap the ports (`-serial stdio -serial null`); `console=serial0` then lands on `ttyAMA0`, and with `-serial mon:stdio`, Ctrl-A b sends a BREAK.
 - **Not emulated:** the BCM43438 Wi-Fi/Bluetooth, the VideoCore (camera, codecs, `vchiq`) and USB device/gadget mode.
 
+### USB/IP export
+
+`usbip-server` exports the QEMU USB device on its port over
+[USB/IP](https://docs.kernel.org/usb/usbip_protocol.html), so another
+machine's USB stack uses it as if it were plugged in -- Linux's
+`usbip attach` (vhci-hcd), or any USB/IP client:
+
+```bash
+qemu-rpi-system-aarch64 -M raspi0 ... \
+  -chardev socket,id=usbipchr,host=127.0.0.1,port=3240,server=on,wait=off \
+  -device usbip-server,id=usbip0,chardev=usbipchr \
+  -drive if=none,id=disk0,format=raw,file=disk.img \
+  -device usb-storage,bus=usbip0.0,drive=disk0
+
+# on a Linux host:
+usbip list -r 127.0.0.1
+sudo usbip attach -r 127.0.0.1 -b 1-1
+```
+
+The server enumerates the device itself (vhci-hcd never sends
+`SET_ADDRESS`), serves one client at a time, and closes the connection
+when the device is unplugged or the machine resets -- how a USB/IP
+exporter reports a removed device. It is allowed on the `raspi*` machines
+and on `-M none`. Tested by `run-usbip-test.py` (control, bulk,
+interrupt, isochronous, unlink, reconnection, with QEMU's usb-storage,
+usb-kbd and usb-audio) and `run-usbip-vhci-test.py` (the kernel's
+vhci-hcd binding its own usb-storage driver).
+
 ### PXE Network Boot
 
 Boot from a TFTP server layout, the same way a real Pi does:
@@ -197,6 +225,8 @@ run-rpi-boot-test.py              Interactive boot test (U-Boot via serial, -nic
 run-rpi-pxeboot-test.py           Autonomous PXE boot test (-nic user)
 run-rpi-socket-boot-test.py       Socket networking boot test (no peer, -nic socket)
 run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic socket)
+run-usbip-test.py                 USB/IP server test (-M none, QEMU USB devices)
+run-usbip-vhci-test.py            USB/IP interop with the kernel's vhci-hcd (root)
 ```
 
 ### QEMU Patches
