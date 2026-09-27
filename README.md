@@ -108,7 +108,8 @@ qemu-rpi-system-aarch64 -M raspi0 \
 - **Wired networking.** A Zero has no on-board Ethernet; like the real board, give it a USB Ethernet adapter on the OTG port: `-netdev user,id=n0 -device usb-net,netdev=n0`. It appears as a `cdc_ether` interface (`usb0`) and gets a DHCP lease from QEMU (`10.0.2.15`, gateway `10.0.2.2`). Leave it off to test a Zero with no network -- also a configuration it boots in.
 - **Board serial.** `-M raspi0,board-serial=0x00000000c0ffee01` sets the serial the guest sees in `/proc/cpuinfo`, `/proc/device-tree/serial-number` and the firmware's `GET_BOARD_SERIAL` (default `0x0000000012345678`).
 - **Magic SysRq over serial.** The mini UART has no break detection (BCM2835 ARM Peripherals, 2.2), so a BREAK never reaches SysRq on `ttyS0` -- on hardware or here. Use the PL011 as the console, as `dtoverlay=disable-bt` does on a real Zero W: apply the overlay to the DTB (`fdtoverlay -i bcm2708-rpi-zero-w.dtb -o zero-w-disable-bt.dtb overlays/disable-bt.dtbo`), boot with that DTB and swap the ports (`-serial stdio -serial null`); `console=serial0` then lands on `ttyAMA0`, and with `-serial mon:stdio`, Ctrl-A b sends a BREAK.
-- **Not emulated:** the BCM43438 Wi-Fi/Bluetooth, the VideoCore (camera, codecs, `vchiq`) and USB device/gadget mode.
+- **USB gadget mode.** With `dtoverlay=dwc2` (apply `overlays/dwc2.dtbo` with `fdtoverlay`) the stock kernel's `dwc2` driver runs the OTG port as a peripheral, and the gadget it runs (configfs, or a legacy `g_*` module) appears on a USB host as a real device, over USB/IP: add `-device dwc2-gadget,bus=usbip0.0` to a `usbip-server` (see [USB/IP export](#usbip-export)) and run `usbip attach -r 127.0.0.1 -b 1-1` on a Linux host. The Zero sees the host come and go as a real cable does (the USB/IP connection is the host's VBUS); with no client it boots with the gadget unattached. `-global dwc2-usb.otg-cable=host|device` overrides the OTG plug (default: device when a `dwc2-gadget` exists). Tested with configfs CDC-ACM, CDC-ECM, CDC-NCM, mass storage and a composite of them (`run-rpi0-gadget-test.py`).
+- **Not emulated:** the BCM43438 Wi-Fi/Bluetooth and the VideoCore (camera, codecs, `vchiq`).
 
 ### USB/IP export
 
@@ -227,6 +228,7 @@ run-rpi-socket-boot-test.py       Socket networking boot test (no peer, -nic soc
 run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic socket)
 run-usbip-test.py                 USB/IP server test (-M none, QEMU USB devices)
 run-usbip-vhci-test.py            USB/IP interop with the kernel's vhci-hcd (root)
+run-rpi0-gadget-test.py           raspi0 USB gadget (dwc2 peripheral mode) over USB/IP
 ```
 
 ### QEMU Patches
