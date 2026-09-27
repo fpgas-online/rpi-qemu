@@ -231,8 +231,13 @@ def run_test():
         print(f"  [{'PASS' if found else 'FAIL'}] {name}")
     for name, pattern in negative_checks:
         found = pattern in text
-        all_pass &= not found
-        print(f"  [{'FAIL' if found else 'PASS'}] {name}")
+        # The BREAK is only sent once the RX prompt appears; without it the
+        # "ignored" check would pass vacuously.
+        exercised = "RX test: READY" in text or "BREAK" not in name
+        ok = exercised and not found
+        all_pass &= ok
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}"
+              + ("" if exercised else " (not exercised)"))
     for name, pattern in pl011_checks:
         found = pattern in pl011_text
         all_pass &= found
