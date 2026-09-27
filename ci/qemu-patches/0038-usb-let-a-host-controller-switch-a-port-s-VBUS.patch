@@ -1,0 +1,127 @@
+From 6b347f45fceeecbf3bd202b4b31945ac39fe3282 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 28 Sep 2026 01:06:38 +0930
+Subject: [PATCH] usb: let a host controller switch a port's VBUS
+
+A USB device that is really a USB OTG controller's gadget needs to know
+whether a host is on the cable: the controller reports a session (VBUS
+valid) and session end to its driver.  Add USBPort.vbus_off, switched by
+usb_port_set_vbus(), and USBDeviceClass.vbus_changed, called when it
+changes.  Ports are powered unless their host controller models VBUS,
+so nothing changes for existing controllers and devices.
+
+usbip-server models it: VBUS is on while a USB/IP client is connected,
+the host on the far end of the cable.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
+---
+ hw/usb/core.c         | 20 ++++++++++++++++++++
+ hw/usb/usbip-server.c |  6 ++++++
+ include/hw/usb/usb.h  | 14 ++++++++++++++
+ 3 files changed, 40 insertions(+)
+
+diff --git a/hw/usb/core.c b/hw/usb/core.c
+index 43653c2..19c5c2d 100644
+--- a/hw/usb/core.c
++++ b/hw/usb/core.c
+@@ -72,6 +72,26 @@ void usb_detach(USBPort *port)
+     dev->state = USB_STATE_NOTATTACHED;
+ }
+ 
++/*
++ * Switch the port's VBUS.  Ports are powered unless their host controller
++ * models VBUS (e.g. usbip-server, powered while a client is connected).
++ */
++void usb_port_set_vbus(USBPort *port, bool on)
++{
++    USBDeviceClass *klass;
++
++    if (port->vbus_off == !on) {
++        return;
++    }
++    port->vbus_off = !on;
++    if (port->dev) {
++        klass = USB_DEVICE_GET_CLASS(port->dev);
++        if (klass->vbus_changed) {
++            klass->vbus_changed(port->dev);
++        }
++    }
++}
++
+ void usb_port_reset(USBPort *port)
+ {
+     USBDevice *dev = port->dev;
+diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
+index a50acf8..781fbc2 100644
+--- a/hw/usb/usbip-server.c
++++ b/hw/usb/usbip-server.c
+@@ -517,6 +517,8 @@ static void usbip_reset_connection(USBIPServerState *s)
+     s->conn = USBIP_CONN_NONE;
+     s->enum_op = 0;
+     s->enumerated = false;
++    /* no host on the cable any more */
++    usb_port_set_vbus(&s->port, false);
+     g_byte_array_set_size(s->rx, 0);
+     g_byte_array_set_size(s->tx, 0);
+     if (s->watch) {
+@@ -977,6 +979,8 @@ static void usbip_event(void *opaque, QEMUChrEvent event)
+         usbip_reset_connection(s);
+         s->conn = USBIP_CONN_OP;
+         trace_usbip_server_connection("opened");
++        /* a client is a host on the cable: VBUS on */
++        usb_port_set_vbus(&s->port, true);
+         break;
+     case CHR_EVENT_CLOSED:
+         usbip_reset_connection(s);
+@@ -1099,6 +1103,8 @@ static void usbip_server_realize(DeviceState *dev, Error **errp)
+     usb_bus_new(&s->bus, sizeof(s->bus), &usbip_bus_ops, dev);
+     /* the exported device itself sits on the port, not a hub before it */
+     s->bus.no_auto_hub = true;
++    /* VBUS is on only while a client is connected */
++    usb_port_set_vbus(&s->port, false);
+     usb_register_port(&s->bus, &s->port, s, 0, &usbip_port_ops,
+                       USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL |
+                       USB_SPEED_MASK_HIGH);
+diff --git a/include/hw/usb/usb.h b/include/hw/usb/usb.h
+index 10b9487..4c9321c 100644
+--- a/include/hw/usb/usb.h
++++ b/include/hw/usb/usb.h
+@@ -295,6 +295,12 @@ struct USBDeviceClass {
+      */
+     void (*handle_attach)(USBDevice *dev);
+ 
++    /*
++     * The port's VBUS changed (usb_port_vbus()): for devices that sense
++     * whether a host is connected, e.g. a USB OTG controller's gadget.
++     */
++    void (*vbus_changed)(USBDevice *dev);
++
+     /*
+      * Reset the device
+      */
+@@ -367,6 +373,8 @@ typedef struct USBPortOps {
+ struct USBPort {
+     USBDevice *dev;
+     int speedmask;
++    /* the host has switched the port's VBUS off (see usb_port_set_vbus) */
++    bool vbus_off;
+     int hubcount;
+     char path[16];
+     USBPortOps *ops;
+@@ -461,6 +469,12 @@ void usb_pick_speed(USBPort *port);
+ void usb_attach(USBPort *port);
+ void usb_detach(USBPort *port);
+ void usb_port_reset(USBPort *port);
++void usb_port_set_vbus(USBPort *port, bool on);
++
++static inline bool usb_port_vbus(USBPort *port)
++{
++    return !port->vbus_off;
++}
+ void usb_device_reset(USBDevice *dev);
+ void usb_wakeup(USBEndpoint *ep, unsigned int stream);
+ void usb_generic_async_ctrl_complete(USBDevice *s, USBPacket *p);
+-- 
+2.47.3
+

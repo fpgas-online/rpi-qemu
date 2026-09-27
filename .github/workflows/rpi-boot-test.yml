@@ -201,8 +201,9 @@ jobs:
             test-images/rpi0/kernel.img
             test-images/rpi0/bcm2708-rpi-zero-w.dtb
             test-images/rpi0/disable-bt.dtbo
+            test-images/rpi0/dwc2.dtbo
             test-images/rpi0/modules
-          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget
 
       - name: Download RPi Zero kernel and DTB
         if: steps.cache-rpi0-kernel.outputs.cache-hit != 'true'
@@ -212,11 +213,20 @@ jobs:
           wget -q -O test-images/rpi0/kernel.img "$FW_BASE/kernel.img"
           wget -q -O test-images/rpi0/bcm2708-rpi-zero-w.dtb "$FW_BASE/bcm2708-rpi-zero-w.dtb"
           wget -q -O test-images/rpi0/disable-bt.dtbo "$FW_BASE/overlays/disable-bt.dtbo"
+          wget -q -O test-images/rpi0/dwc2.dtbo "$FW_BASE/overlays/dwc2.dtbo"
           # USB network drivers for usb-net (modules of the same kernel)
           mkdir -p test-images/rpi0/modules
           MOD_BASE="https://raw.githubusercontent.com/raspberrypi/firmware/bead686816848038563a542dc854346ab13253a2/modules/6.18.52+/kernel/drivers/net/usb"
           for m in cdc_ether rndis_host; do
             wget -q -O "test-images/rpi0/modules/$m.ko.xz" "$MOD_BASE/$m.ko.xz"
+          done
+          # The dwc2 driver and USB gadget functions (#22)
+          K="https://raw.githubusercontent.com/raspberrypi/firmware/bead686816848038563a542dc854346ab13253a2/modules/6.18.52+/kernel/drivers/usb"
+          for p in roles/roles dwc2/dwc2 gadget/libcomposite \
+                   gadget/function/u_serial gadget/function/usb_f_acm \
+                   gadget/function/u_ether gadget/function/usb_f_ecm \
+                   gadget/function/usb_f_ncm gadget/function/usb_f_mass_storage; do
+            wget -q -O "test-images/rpi0/modules/$(basename $p).ko.xz" "$K/$p.ko.xz"
           done
 
       - name: Apply the disable-bt overlay to the Zero W DTB
@@ -225,16 +235,25 @@ jobs:
           fdtoverlay -i test-images/rpi0/bcm2708-rpi-zero-w.dtb \
             -o test-images/rpi0/bcm2708-rpi-zero-w-disable-bt.dtb \
             test-images/rpi0/disable-bt.dtbo
+          # dtoverlay=dwc2: the upstream dwc2 driver on the OTG port (#22)
+          fdtoverlay -i test-images/rpi0/bcm2708-rpi-zero-w.dtb \
+            -o test-images/rpi0/bcm2708-rpi-zero-w-dwc2.dtb \
+            test-images/rpi0/dwc2.dtbo
 
       - name: Download Alpine armhf and build RPi Zero initramfs
         run: |
           wget -q -O test-images/alpine-minirootfs-armhf.tar.gz \
             "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/armhf/alpine-minirootfs-3.21.3-armhf.tar.gz"
           python3 build-initramfs.py --target rpi0
+          python3 build-initramfs.py --target rpi0-gadget
 
       - name: Run RPi Zero (raspi0) boot test
         run: |
           QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi0-boot-test.py
+
+      - name: Run RPi Zero (raspi0) USB gadget test
+        run: |
+          QEMU_OVERRIDE=$(which qemu-rpi-system-aarch64) python3 run-rpi0-gadget-test.py
 
       - name: USB/IP client unit tests
         run: python3 ci/test_usbip_client.py

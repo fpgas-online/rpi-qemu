@@ -1,0 +1,1606 @@
+From 88e02043d7e2f1f8b4bc63d2f669b24ec210282a Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 28 Sep 2026 01:06:38 +0930
+Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
+ device
+
+The DWC2 model was host-only: the device-mode registers read as zero.
+Model the peripheral side as the stock Linux dwc2 driver uses it on the
+BCM2835 (buffer DMA; the core has no descriptor DMA), and present the
+guest's gadget to a QEMU USB host controller as a USB device:
+
+  -device usbip-server,id=usbip0,chardev=... -device dwc2-gadget,bus=usbip0.0
+
+The OTG connector (otg-cable property):
+- "host" (A-plug) keeps today's behaviour; "device" (B-plug) makes the
+  controller a peripheral; "auto" (default) is device when a dwc2-gadget
+  exists for the controller, so existing command lines are unchanged.
+- GINTSTS.CurMod follows GUSBCFG.ForceHstMode/ForceDevMode, else the ID
+  pin (GOTGCTL.ConIDSts); GOTGINT is write-1-to-clear and GINTSTS.OTGInt
+  follows it.
+- The session follows the host port's VBUS (usb_port_set_vbus): B-session
+  valid and SessReqInt when a host appears, SesEndDet when it goes, and
+  the core then reports its bus suspended (DSTS.SuspSts).
+- The gadget is attached to the host only while the guest pulls up
+  (DCTL.SftDiscon clear) in device role with a valid session.
+
+The device side:
+- DCFG, DCTL (soft disconnect, global IN/OUT NAK with GINNakEff and
+  GOUTNakEff), DSTS (enumerated speed, SOF frame number), DIEPMSK,
+  DOEPMSK, DAINT, DAINTMSK, DIEPEMPMSK, and per endpoint DxEPCTL (EPEna,
+  EPDis with EPDisbld, SNAK/CNAK, data PID, stall), DxEPINT, DxEPTSIZ,
+  DxEPDMA, DTXFSTS; DPTXFSIZn with the BCM2835's per-FIFO maximum depths
+  as reset values (512 words for FIFOs 1-5, 768 for 6-7), which the
+  driver checks its g-tx-fifo-size against.
+- A host bus reset raises USBRst, EnumDone 10 ms later (T_DRST) with
+  DSTS.EnumSpd, and allows the first SETUP only after the 10 ms of reset
+  recovery (T_RSTRCY): the driver re-initialises EP0 in its reset and
+  enumeration handlers.  Reset signalling on a suspended bus raises
+  WkUpInt, which brings the driver back from the disconnected state.
+- Control transfers: the SETUP is DMA'd into EP0 OUT when armed
+  (DOEPINT0.Setup, SUPCnt), then the data and status stages follow the
+  guest's EP0 IN/OUT programming; a stall on EP0 answers the stage the
+  host is in.
+- Data endpoints: host packets wait (USB_RET_ASYNC) until the guest arms
+  the endpoint, then move by DMA packet by packet with the core's
+  XferSize/PktCnt accounting, so short and zero-length packets end
+  transfers where they would on the wire and one host transfer may span
+  several guest transfers (or the reverse).  An endpoint the guest has
+  not activated stalls.  Isochronous endpoints move one packet per
+  (micro)frame without waiting; a token for an idle one raises NAK (IN)
+  or OUTTknEPdis (OUT), from which the driver starts its stream.
+  Activating an endpoint publishes its type to QEMU's USB core
+  (usb_ep_set_type); a controller reset clears them.
+- SNAK on an IN endpoint is effective at once (DIEPINT.INEPNakEff, which
+  the driver waits for with dedicated FIFOs); the global IN NAK applies
+  to the non-periodic endpoints.  A bus or controller reset ends the
+  host's transfers in progress (USB_RET_IOERROR), and a SET_ADDRESS the
+  guest completes sets the device address QEMU's host controllers use.
+
+Tested with the stock Raspberry Pi Zero W kernel (6.18.52+, dwc2 module,
+dtoverlay=dwc2 applied with fdtoverlay) on raspi0, a configfs gadget
+bound, and a USB/IP client as the host: CDC-ACM (a shell on ttyGS0),
+CDC-ECM and CDC-NCM (ARP and ICMP echo with usb0), mass storage (reads
+of the gadget's image, a write the guest then sees in its file), a
+composite of ACM + ECM + mass storage; no host at all, a host at boot,
+a host after boot, detach and reattach.  The driver probes as on
+silicon ("EPs: 8, dedicated fifos, 4080 entries in SPRAM") with no
+parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
+---
+ hw/usb/dwc2-gadget.c | 1114 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/hcd-dwc2.c    |  125 ++++-
+ hw/usb/hcd-dwc2.h    |   67 +++
+ hw/usb/meson.build   |    2 +-
+ hw/usb/trace-events  |   10 +
+ 5 files changed, 1293 insertions(+), 25 deletions(-)
+ create mode 100644 hw/usb/dwc2-gadget.c
+
+diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
+new file mode 100644
+index 0000000..784f7a8
+--- /dev/null
++++ b/hw/usb/dwc2-gadget.c
+@@ -0,0 +1,1114 @@
++/*
++ * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
++ *
++ * The guest drives the controller's device registers exactly as on
++ * silicon (buffer DMA, the mode the BCM2835's core supports and the stock
++ * Linux dwc2 driver uses); the "dwc2-gadget" USB device presents what it
++ * does to a QEMU USB host controller, e.g. usbip-server:
++ *
++ *   -device usbip-server,id=usbip0,chardev=... -device dwc2-gadget,bus=usbip0.0
++ *
++ * Host packets wait (USB_RET_ASYNC) until the guest arms the endpoint, as
++ * a real host's transactions are NAKed; data moves by DMA packet by packet
++ * with the core's XferSize/PktCnt accounting, so short packets, zero
++ * length packets and transfers spanning several host or device buffers
++ * end exactly where they would on the wire.
++ *
++ * Copyright (c) 2026 Tim 'mithro' Ansell <me@mith.ro>
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/bswap.h"
++#include "qemu/error-report.h"
++#include "qemu/iov.h"
++#include "qemu/log.h"
++#include "qemu/main-loop.h"
++#include "qemu/timer.h"
++#include "qapi/error.h"
++#include "hw/core/qdev-properties.h"
++#include "hw/usb/dwc2-regs.h"
++#include "hw/usb/usb.h"
++#include "migration/vmstate.h"
++#include "hcd-dwc2.h"
++#include "trace.h"
++
++#define TYPE_DWC2_GADGET "dwc2-gadget"
++OBJECT_DECLARE_SIMPLE_TYPE(DWC2GadgetState, DWC2_GADGET)
++
++typedef enum DWC2CtrlPhase {
++    DWC2_CTRL_IDLE,
++    DWC2_CTRL_SETUP,            /* SETUP waiting for EP0 OUT to be armed */
++    DWC2_CTRL_DATA_IN,
++    DWC2_CTRL_DATA_OUT,
++    DWC2_CTRL_STATUS_IN,
++    DWC2_CTRL_STATUS_OUT,
++} DWC2CtrlPhase;
++
++struct DWC2GadgetState {
++    USBDevice parent_obj;
++
++    DWC2State *dwc2;
++    QEMUBH *connect_bh;
++
++    /* Bus reset signalling (T_DRST) and reset recovery (T_RSTRCY) */
++    QEMUTimer *reset_timer;
++    int reset_phase;
++
++    /* The host's control transfer on EP0 */
++    USBPacket *ctrl_p;
++    DWC2CtrlPhase ctrl_phase;
++    uint32_t ctrl_len;
++    uint32_t ctrl_done;
++
++    /* The host's packet on each data endpoint, per direction */
++    USBPacket *in_p[DWC2_NB_EP];
++    USBPacket *out_p[DWC2_NB_EP];
++    uint32_t out_off[DWC2_NB_EP];
++};
++
++/* Per-endpoint register block: DxEPCTL, -, DxEPINT, -, DxEPTSIZ, DxEPDMA */
++enum {
++    DEP_CTL = 0,
++    DEP_INT = 2,
++    DEP_TSIZ = 4,
++    DEP_DMA = 5,
++    DEP_TXFSTS = 6,
++    DEP_DMAB = 7,
++};
++
++static uint32_t *dwc2_ep(DWC2State *s, int n, bool in)
++{
++    return in ? s->iepreg[n] : s->oepreg[n];
++}
++
++/* Role, session and connection */
++
++static bool dwc2_cable_is_device(DWC2State *s)
++{
++    return s->otg_cable == DWC2_CABLE_DEVICE ||
++           (s->otg_cable == DWC2_CABLE_AUTO && s->gadget);
++}
++
++bool dwc2_is_host_role(DWC2State *s)
++{
++    if (s->gusbcfg & GUSBCFG_FORCEHOSTMODE) {
++        return true;
++    }
++    if (s->gusbcfg & GUSBCFG_FORCEDEVMODE) {
++        return false;
++    }
++    return !(s->gotgctl & GOTGCTL_CONID_B);
++}
++
++static bool dwc2_vbus(DWC2State *s)
++{
++    USBDevice *dev = s->gadget ? USB_DEVICE(s->gadget) : NULL;
++
++    return dev && dev->port && usb_port_vbus(dev->port);
++}
++
++/*
++ * The OTG connector: with a B-plug (ID floating) the controller is a
++ * peripheral and the session follows the host's VBUS; with an A-plug (ID
++ * grounded) it is the host and powers VBUS itself.
++ */
++static void dwc2_session_apply(DWC2State *s, bool events)
++{
++    uint32_t old = s->gotgctl;
++
++    s->gotgctl &= ~(GOTGCTL_CONID_B | GOTGCTL_ASESVLD | GOTGCTL_BSESVLD);
++    if (!dwc2_cable_is_device(s)) {
++        s->gotgctl |= GOTGCTL_ASESVLD | GOTGCTL_BSESVLD;
++    } else {
++        s->gotgctl |= GOTGCTL_CONID_B;
++        if (dwc2_vbus(s)) {
++            s->gotgctl |= GOTGCTL_ASESVLD | GOTGCTL_BSESVLD;
++        }
++    }
++
++    if (events) {
++        if ((old ^ s->gotgctl) & GOTGCTL_CONID_B) {
++            dwc2_set_gintsts(s, GINTSTS_CONIDSTSCHNG, true);
++        }
++        if (!(old & GOTGCTL_BSESVLD) && (s->gotgctl & GOTGCTL_BSESVLD)) {
++            dwc2_set_gintsts(s, GINTSTS_SESSREQINT, true);
++        } else if ((old & GOTGCTL_BSESVLD) &&
++                   !(s->gotgctl & GOTGCTL_BSESVLD)) {
++            s->gotgint |= GOTGINT_SES_END_DET;
++            dwc2_set_gintsts(s, GINTSTS_OTGINT, true);
++            /* no host, no bus traffic: the core is suspended */
++            s->dsts |= DSTS_SUSPSTS;
++        }
++    }
++    dwc2_device_update_connection(s);
++}
++
++void dwc2_device_update_session(DWC2State *s)
++{
++    dwc2_session_apply(s, true);
++}
++
++/*
++ * The host sees the device while the controller is a peripheral with a
++ * valid session and the pull-up connected (DCTL.SftDiscon clear).
++ */
++static bool dwc2_pullup_visible(DWC2State *s)
++{
++    return s->gadget && !dwc2_is_host_role(s) &&
++           (s->gotgctl & GOTGCTL_BSESVLD) && !(s->dctl & DCTL_SFTDISCON);
++}
++
++void dwc2_device_update_connection(DWC2State *s)
++{
++    if (s->gadget) {
++        qemu_bh_schedule(s->gadget->connect_bh);
++    }
++}
++
++static void dwc2_gadget_connect_bh(void *opaque)
++{
++    DWC2GadgetState *g = opaque;
++    USBDevice *dev = USB_DEVICE(g);
++    DWC2State *s = g->dwc2;
++    bool want = s && s->gadget == g && dwc2_pullup_visible(s);
++    Error *err = NULL;
++
++    if (want == dev->attached || !dev->port) {
++        return;
++    }
++    trace_usb_dwc2_gadget_connect(want);
++    if (want) {
++        dev->speedmask = USB_SPEED_MASK_FULL;
++        if (get_field(s->dcfg, DCFG_DEVSPD) == DCFG_DEVSPD_HS) {
++            dev->speedmask |= USB_SPEED_MASK_HIGH;
++        }
++        usb_device_attach(dev, &err);
++        if (err) {
++            warn_report_err(err);
++        }
++    } else {
++        timer_del(g->reset_timer);
++        g->reset_phase = 0;
++        usb_device_detach(dev);
++    }
++}
++
++/* Interrupts */
++
++void dwc2_device_update_irq(DWC2State *s)
++{
++    uint32_t daint = 0;
++    int n;
++
++    for (n = 0; n < DWC2_NB_EP; n++) {
++        uint32_t imsk = s->diepmsk;
++
++        if ((s->diepempmsk >> n) & 1) {
++            imsk |= DXEPINT_TXFEMP;
++        }
++        if (s->iepreg[n][DEP_INT] & imsk) {
++            daint |= 1 << n;
++        }
++        if (s->oepreg[n][DEP_INT] & s->doepmsk) {
++            daint |= 1 << (16 + n);
++        }
++    }
++    s->daint = daint;
++    dwc2_set_gintsts(s, GINTSTS_IEPINT, daint & s->daintmsk & 0x0000ffff);
++    dwc2_set_gintsts(s, GINTSTS_OEPINT, daint & s->daintmsk & 0xffff0000);
++}
++
++/* Endpoint transfer accounting (DxEPTSIZ) */
++
++static uint32_t dwc2_ep_mps(DWC2State *s, int n, bool in)
++{
++    static const uint32_t ep0_mps[] = { 64, 32, 16, 8 };
++    uint32_t ctl = dwc2_ep(s, n, in)[DEP_CTL];
++
++    if (n == 0) {
++        return ep0_mps[ctl & D0EPCTL_MPS_MASK];
++    }
++    return ctl & DXEPCTL_MPS_MASK;
++}
++
++static void dwc2_tsiz_get(DWC2State *s, int n, bool in,
++                          uint32_t *xfer, uint32_t *pkt)
++{
++    uint32_t tsiz = dwc2_ep(s, n, in)[DEP_TSIZ];
++
++    if (n == 0) {
++        *xfer = tsiz & 0x7f;
++        *pkt = (tsiz >> 19) & (in ? 3 : 1);
++    } else {
++        *xfer = DXEPTSIZ_XFERSIZE_GET(tsiz);
++        *pkt = DXEPTSIZ_PKTCNT_GET(tsiz);
++    }
++}
++
++static void dwc2_tsiz_set(DWC2State *s, int n, bool in,
++                          uint32_t xfer, uint32_t pkt)
++{
++    uint32_t *tsiz = &dwc2_ep(s, n, in)[DEP_TSIZ];
++    uint32_t xmask = n ? DXEPTSIZ_XFERSIZE_MASK : 0x7f;
++    uint32_t pmask = n ? 0x3ff : (in ? 3 : 1);
++
++    *tsiz &= ~(xmask | (pmask << 19));
++    *tsiz |= (xfer & xmask) | ((pkt & pmask) << 19);
++}
++
++/* The programmed transfer is complete: the core disables the endpoint. */
++static void dwc2_ep_xfer_done(DWC2State *s, int n, bool in)
++{
++    uint32_t *ep = dwc2_ep(s, n, in);
++
++    ep[DEP_CTL] &= ~DXEPCTL_EPENA;
++    if (!in) {
++        ep[DEP_CTL] |= DXEPCTL_NAKSTS;  /* NAK further OUT until re-armed */
++    }
++    ep[DEP_INT] |= DXEPINT_XFERCOMPL;
++    trace_usb_dwc2_gadget_xfercompl(n, in);
++}
++
++static bool dwc2_ep_dma(DWC2State *s, int n, bool in, void *buf,
++                        uint32_t len)
++{
++    uint32_t *ep = dwc2_ep(s, n, in);
++    MemTxResult r;
++
++    if (!len) {
++        return true;            /* zero-length packet */
++    }
++    if (in) {
++        r = dma_memory_read(&s->dma_as, ep[DEP_DMA], buf, len,
++                            MEMTXATTRS_UNSPECIFIED);
++    } else {
++        r = dma_memory_write(&s->dma_as, ep[DEP_DMA], buf, len,
++                             MEMTXATTRS_UNSPECIFIED);
++    }
++    if (r != MEMTX_OK) {
++        qemu_log_mask(LOG_GUEST_ERROR, "dwc2: EP%d %s DMA to 0x%08x failed\n",
++                      n, in ? "IN" : "OUT", ep[DEP_DMA]);
++        ep[DEP_CTL] &= ~DXEPCTL_EPENA;
++        ep[DEP_INT] |= DXEPINT_AHBERR;
++        return false;
++    }
++    ep[DEP_DMA] += len;
++    return true;
++}
++
++/*
++ * IN: move packets from the guest's armed transfer into @buf (room @room).
++ * Returns the bytes moved; *host_done is set when the host's transfer
++ * ends (a short packet, or its buffer is full), *babble if the device
++ * sent more than the host asked for.
++ */
++static uint32_t dwc2_ep_in_packets(DWC2State *s, int n, uint8_t *buf,
++                                   uint32_t room, bool *host_done,
++                                   bool *babble)
++{
++    uint32_t *ep = dwc2_ep(s, n, true);
++    uint32_t mps = dwc2_ep_mps(s, n, true);
++    uint32_t xfer, pkt, moved = 0;
++    uint32_t type = ep[DEP_CTL] & DXEPCTL_EPTYPE_MASK;
++    bool periodic = n > 0 && (type == DXEPCTL_EPTYPE_ISO ||
++                              type == DXEPCTL_EPTYPE_INTERRUPT);
++
++    *host_done = false;
++    *babble = false;
++    /* the global IN NAK applies to the non-periodic endpoints */
++    if (!(ep[DEP_CTL] & DXEPCTL_EPENA) || (ep[DEP_CTL] & DXEPCTL_NAKSTS) ||
++        (!periodic && (s->dctl & DCTL_GNPINNAKSTS))) {
++        return 0;
++    }
++    dwc2_tsiz_get(s, n, true, &xfer, &pkt);
++    while (pkt > 0) {
++        uint32_t chunk = MIN(mps, xfer);
++
++        if (chunk > room - moved) {
++            *babble = true;
++            *host_done = true;
++            break;
++        }
++        if (!dwc2_ep_dma(s, n, true, buf + moved, chunk)) {
++            return moved;
++        }
++        moved += chunk;
++        xfer -= chunk;
++        pkt--;
++        if (chunk < mps || moved == room) {
++            *host_done = true;
++            break;
++        }
++    }
++    dwc2_tsiz_set(s, n, true, xfer, pkt);
++    if (pkt == 0) {
++        dwc2_ep_xfer_done(s, n, true);
++    }
++    return moved;
++}
++
++/*
++ * OUT: move packets of the host's data (@remaining bytes left, the first
++ * of them at @data) into the guest's armed transfer.  Returns the bytes
++ * moved; *host_done is set when all of the host's data has been delivered.
++ */
++static uint32_t dwc2_ep_out_packets(DWC2State *s, int n, const uint8_t *data,
++                                    uint32_t remaining, bool *host_done)
++{
++    uint32_t *ep = dwc2_ep(s, n, false);
++    uint32_t mps = dwc2_ep_mps(s, n, false);
++    uint32_t xfer, pkt, moved = 0;
++    bool short_pkt = false;
++
++    *host_done = false;
++    if (!(ep[DEP_CTL] & DXEPCTL_EPENA) || (ep[DEP_CTL] & DXEPCTL_NAKSTS) ||
++        (s->dctl & DCTL_GOUTNAKSTS)) {
++        return 0;
++    }
++    dwc2_tsiz_get(s, n, false, &xfer, &pkt);
++    while (pkt > 0) {
++        uint32_t chunk = MIN(mps, remaining - moved);
++
++        if (chunk > xfer) {
++            qemu_log_mask(LOG_GUEST_ERROR,
++                          "dwc2: EP%d OUT packet of %u bytes overflows the "
++                          "%u left in the transfer\n", n, chunk, xfer);
++            chunk = xfer;
++        }
++        if (!dwc2_ep_dma(s, n, false, (uint8_t *)data + moved, chunk)) {
++            return moved;
++        }
++        moved += chunk;
++        xfer -= chunk;
++        pkt--;
++        if (chunk < mps) {
++            short_pkt = true;
++        }
++        if (short_pkt || moved == remaining) {
++            *host_done = moved == remaining;
++            break;
++        }
++    }
++    dwc2_tsiz_set(s, n, false, xfer, pkt);
++    if (pkt == 0 || short_pkt) {
++        dwc2_ep_xfer_done(s, n, false);
++    }
++    return moved;
++}
++
++/* Control transfers on EP0 */
++
++static void dwc2_ctrl_complete(DWC2GadgetState *g, int status)
++{
++    USBPacket *p = g->ctrl_p;
++
++    trace_usb_dwc2_gadget_ctrl_complete(status, g->ctrl_done);
++    if (status == USB_RET_SUCCESS &&
++        g->parent_obj.setup_buf[0] == (USB_DIR_OUT | USB_TYPE_STANDARD |
++                                       USB_RECIP_DEVICE) &&
++        g->parent_obj.setup_buf[1] == USB_REQ_SET_ADDRESS) {
++        /* the address QEMU's host controllers find the device by */
++        g->parent_obj.addr = g->parent_obj.setup_buf[2];
++    }
++    g->ctrl_p = NULL;
++    g->ctrl_phase = DWC2_CTRL_IDLE;
++    p->status = status;
++    p->actual_length = g->ctrl_done;
++    usb_generic_async_ctrl_complete(USB_DEVICE(g), p);
++}
++
++static void dwc2_ep0_run(DWC2GadgetState *g)
++{
++    DWC2State *s = g->dwc2;
++    USBDevice *dev = USB_DEVICE(g);
++    uint32_t *in0 = s->iepreg[0], *out0 = s->oepreg[0];
++    bool done;
++
++    if (!g->ctrl_p) {
++        return;
++    }
++
++    /* A stall answers whatever stage the host is in. */
++    if (g->ctrl_phase != DWC2_CTRL_SETUP &&
++        ((in0[DEP_CTL] | out0[DEP_CTL]) & DXEPCTL_STALL)) {
++        dwc2_ctrl_complete(g, USB_RET_STALL);
++        return;
++    }
++
++    switch (g->ctrl_phase) {
++    case DWC2_CTRL_SETUP: {
++        uint32_t xfer, pkt, supcnt;
++
++        /* no SETUP during a bus reset or its recovery time */
++        if (g->reset_phase) {
++            return;
++        }
++        if (!(out0[DEP_CTL] & DXEPCTL_EPENA)) {
++            return;
++        }
++        if (!dwc2_ep_dma(s, 0, false, dev->setup_buf, 8)) {
++            dwc2_ctrl_complete(g, USB_RET_IOERROR);
++            return;
++        }
++        dwc2_tsiz_get(s, 0, false, &xfer, &pkt);
++        supcnt = get_field(out0[DEP_TSIZ], DOEPTSIZ0_SUPCNT);
++        dwc2_tsiz_set(s, 0, false, xfer > 8 ? xfer - 8 : 0,
++                      pkt ? pkt - 1 : 0);
++        set_field(&out0[DEP_TSIZ], supcnt ? supcnt - 1 : 0, DOEPTSIZ0_SUPCNT);
++        /* a SETUP clears a stall and NAKs both directions of EP0 */
++        out0[DEP_CTL] &= ~(DXEPCTL_EPENA | DXEPCTL_STALL);
++        in0[DEP_CTL] &= ~DXEPCTL_STALL;
++        out0[DEP_CTL] |= DXEPCTL_NAKSTS;
++        in0[DEP_CTL] |= DXEPCTL_NAKSTS;
++        out0[DEP_INT] |= DXEPINT_SETUP;
++        trace_usb_dwc2_gadget_setup(ldq_le_p(dev->setup_buf));
++        if (g->ctrl_len == 0) {
++            g->ctrl_phase = DWC2_CTRL_STATUS_IN;
++        } else if (dev->setup_buf[0] & USB_DIR_IN) {
++            g->ctrl_phase = DWC2_CTRL_DATA_IN;
++        } else {
++            g->ctrl_phase = DWC2_CTRL_DATA_OUT;
++        }
++        break;
++    }
++    case DWC2_CTRL_DATA_IN: {
++        bool babble;
++
++        g->ctrl_done += dwc2_ep_in_packets(s, 0, dev->data_buf + g->ctrl_done,
++                                           g->ctrl_len - g->ctrl_done,
++                                           &done, &babble);
++        if (babble) {
++            dwc2_ctrl_complete(g, USB_RET_BABBLE);
++        } else if (done) {
++            g->ctrl_phase = DWC2_CTRL_STATUS_OUT;
++        }
++        break;
++    }
++    case DWC2_CTRL_DATA_OUT:
++        g->ctrl_done += dwc2_ep_out_packets(s, 0,
++                                            dev->data_buf + g->ctrl_done,
++                                            g->ctrl_len - g->ctrl_done, &done);
++        if (done) {
++            g->ctrl_phase = DWC2_CTRL_STATUS_IN;
++        }
++        break;
++    case DWC2_CTRL_STATUS_IN: {
++        bool babble;
++
++        dwc2_ep_in_packets(s, 0, NULL, 0, &done, &babble);
++        if (done) {
++            dwc2_ctrl_complete(g, babble ? USB_RET_BABBLE : USB_RET_SUCCESS);
++        }
++        break;
++    }
++    case DWC2_CTRL_STATUS_OUT:
++        dwc2_ep_out_packets(s, 0, NULL, 0, &done);
++        if (done) {
++            dwc2_ctrl_complete(g, USB_RET_SUCCESS);
++        }
++        break;
++    case DWC2_CTRL_IDLE:
++        break;
++    }
++}
++
++/* Data endpoints */
++
++/*
++ * Returns true if the host's packet on endpoint @n is finished (its status
++ * set); the caller completes it.
++ */
++/* Whether a transfer is armed on the endpoint (and not NAKing). */
++static bool dwc2_ep_armed(DWC2State *s, int n, bool in)
++{
++    uint32_t ctl = dwc2_ep(s, n, in)[DEP_CTL];
++
++    return (ctl & DXEPCTL_EPENA) && !(ctl & DXEPCTL_NAKSTS);
++}
++
++static bool dwc2_ep_in_run(DWC2GadgetState *g, int n)
++{
++    DWC2State *s = g->dwc2;
++    USBPacket *p = g->in_p[n];
++    uint32_t *ep = s->iepreg[n];
++    g_autofree uint8_t *buf = NULL;
++    uint32_t room, moved, xfer, pkt;
++    bool done, babble;
++
++    if (ep[DEP_CTL] & DXEPCTL_STALL) {
++        p->status = USB_RET_STALL;
++        return true;
++    }
++    if (!dwc2_ep_armed(s, n, true)) {
++        return false;
++    }
++    room = p->iov.size - p->actual_length;
++    dwc2_tsiz_get(s, n, true, &xfer, &pkt);
++    buf = g_malloc(MAX(MIN(room, xfer), 1));    /* at most xfer is sent */
++    moved = dwc2_ep_in_packets(s, n, buf, room, &done, &babble);
++    usb_packet_copy(p, buf, moved);
++    if (babble) {
++        p->status = USB_RET_BABBLE;
++    }
++    return done;
++}
++
++static bool dwc2_ep_out_run(DWC2GadgetState *g, int n)
++{
++    DWC2State *s = g->dwc2;
++    USBPacket *p = g->out_p[n];
++    g_autofree uint8_t *data = NULL;
++    size_t len = p->iov.size;
++    uint32_t window, xfer, pkt;
++    bool done;
++
++    if (s->oepreg[n][DEP_CTL] & DXEPCTL_STALL) {
++        p->status = USB_RET_STALL;
++        return true;
++    }
++    if (!dwc2_ep_armed(s, n, false)) {
++        return false;
++    }
++    /* only as much of the host's data as the armed transfer can take */
++    dwc2_tsiz_get(s, n, false, &xfer, &pkt);
++    window = MIN(len - g->out_off[n], xfer);
++    data = g_malloc(MAX(window, 1));
++    iov_to_buf(p->iov.iov, p->iov.niov, g->out_off[n], data, window);
++    g->out_off[n] += dwc2_ep_out_packets(s, n, data, len - g->out_off[n],
++                                         &done);
++    if (done) {
++        p->actual_length = len;
++    }
++    return done;
++}
++
++/* An asynchronous host packet the endpoint has finished. */
++static void dwc2_gadget_packet_done(USBDevice *dev, USBPacket *p)
++{
++    if (p->status == USB_RET_ASYNC) {
++        p->status = USB_RET_SUCCESS;
++    }
++    usb_packet_complete(dev, p);
++}
++
++/* A reset ends every transfer the host has in progress. */
++static void dwc2_gadget_fail_packets(DWC2GadgetState *g)
++{
++    USBDevice *dev = USB_DEVICE(g);
++    int n;
++
++    if (g->ctrl_p) {
++        dwc2_ctrl_complete(g, USB_RET_IOERROR);
++    }
++    for (n = 0; n < DWC2_NB_EP; n++) {
++        USBPacket *in = g->in_p[n], *out = g->out_p[n];
++
++        g->in_p[n] = NULL;
++        g->out_p[n] = NULL;
++        if (in) {
++            in->status = USB_RET_IOERROR;
++            usb_packet_complete(dev, in);
++        }
++        if (out) {
++            out->status = USB_RET_IOERROR;
++            usb_packet_complete(dev, out);
++        }
++    }
++}
++
++/* Run every transfer the guest's endpoint programming allows. */
++void dwc2_device_run(DWC2State *s)
++{
++    DWC2GadgetState *g = s->gadget;
++    USBDevice *dev;
++    int n;
++
++    if (!g || dwc2_is_host_role(s)) {
++        return;
++    }
++    dev = USB_DEVICE(g);
++    dwc2_ep0_run(g);
++    for (n = 1; n < DWC2_NB_EP; n++) {
++        if (g->in_p[n] && dwc2_ep_in_run(g, n)) {
++            USBPacket *p = g->in_p[n];
++
++            g->in_p[n] = NULL;
++            dwc2_gadget_packet_done(dev, p);
++        }
++        if (g->out_p[n] && dwc2_ep_out_run(g, n)) {
++            USBPacket *p = g->out_p[n];
++
++            g->out_p[n] = NULL;
++            dwc2_gadget_packet_done(dev, p);
++        }
++    }
++    dwc2_device_update_irq(s);
++}
++
++/* Device registers (0x800-0xdff) */
++
++static uint32_t dwc2_dsts(DWC2State *s)
++{
++    /* SOF frame number, counting (micro)frames of the enumerated speed */
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t frame = get_field(s->dsts, DSTS_ENUMSPD) == DSTS_ENUMSPD_HS ?
++                    now / 125000 : now / 1000000;
++
++    return (s->dsts & ~DSTS_SOFFN_MASK) |
++           ((frame << DSTS_SOFFN_SHIFT) & DSTS_SOFFN_MASK);
++}
++
++uint64_t dwc2_dreg_read(DWC2State *s, hwaddr addr)
++{
++    uint32_t val = 0;
++
++    if (addr >= DCFG && addr < DCFG + DWC2_DREG_SIZE) {
++        val = addr == DSTS ? dwc2_dsts(s) : s->dreg[(addr - DCFG) >> 2];
++    } else if (addr >= DIEPCTL(0) && addr < DIEPCTL(DWC2_EP_BLOCKS)) {
++        int n = (addr - DIEPCTL(0)) >> 5;
++        val = n < DWC2_NB_EP ? s->iepreg[n][(addr >> 2) & 7] : 0;
++    } else if (addr >= DOEPCTL(0) && addr < DOEPCTL(DWC2_EP_BLOCKS)) {
++        int n = (addr - DOEPCTL(0)) >> 5;
++        val = n < DWC2_NB_EP ? s->oepreg[n][(addr >> 2) & 7] : 0;
++    }
++    trace_usb_dwc2_dreg_read(addr, val);
++    return val;
++}
++
++static void dwc2_epctl_write(DWC2State *s, int n, bool in, uint32_t val)
++{
++    uint32_t *ctl = &dwc2_ep(s, n, in)[DEP_CTL];
++    uint32_t old = *ctl, v;
++    uint32_t rw;
++
++    if (n == 0) {
++        /* EP0: always active control endpoint; the core clears STALL */
++        rw = D0EPCTL_MPS_MASK | (in ? DXEPCTL_TXFNUM_MASK : 0);
++        v = (old & ~rw) | (val & rw) | DXEPCTL_USBACTEP |
++            (val & DXEPCTL_STALL);
++    } else {
++        rw = DXEPCTL_MPS_MASK | DXEPCTL_USBACTEP | DXEPCTL_EPTYPE_MASK |
++             DXEPCTL_SNP | DXEPCTL_STALL | DXEPCTL_TXFNUM_MASK;
++        v = (old & ~rw) | (val & rw);
++        if (val & DXEPCTL_SETD0PID) {
++            v &= ~DXEPCTL_DPID;
++        }
++        if (val & DXEPCTL_SETD1PID) {
++            v |= DXEPCTL_DPID;
++        }
++    }
++    if (n > 0 && s->gadget) {
++        /* the endpoint as the host sees it: active, with its type */
++        static const uint8_t type[] = {
++            USB_ENDPOINT_XFER_CONTROL, USB_ENDPOINT_XFER_ISOC,
++            USB_ENDPOINT_XFER_BULK, USB_ENDPOINT_XFER_INT,
++        };
++
++        usb_ep_set_type(USB_DEVICE(s->gadget),
++                        in ? USB_TOKEN_IN : USB_TOKEN_OUT, n,
++                        v & DXEPCTL_USBACTEP ?
++                        type[(v & DXEPCTL_EPTYPE_MASK) >> 18] :
++                        USB_ENDPOINT_XFER_INVALID);
++    }
++    if (val & DXEPCTL_SNAK) {
++        v |= DXEPCTL_NAKSTS;
++        if (in) {
++            /* the core NAKs the next IN token at once: NAK effective */
++            dwc2_ep(s, n, true)[DEP_INT] |= DXEPINT_INEPNAKEFF;
++        }
++    }
++    if (val & DXEPCTL_CNAK) {
++        v &= ~DXEPCTL_NAKSTS;
++    }
++    if ((val & DXEPCTL_EPDIS) && (old & DXEPCTL_EPENA)) {
++        v &= ~DXEPCTL_EPENA;
++        dwc2_ep(s, n, in)[DEP_INT] |= DXEPINT_EPDISBLD;
++    } else if (val & DXEPCTL_EPENA) {
++        v |= DXEPCTL_EPENA;
++    }
++    *ctl = v;
++}
++
++static void dwc2_dctl_write(DWC2State *s, uint32_t val)
++{
++    uint32_t old = s->dctl;
++    uint32_t v = (val & ~(DCTL_SGNPINNAK | DCTL_CGNPINNAK | DCTL_SGOUTNAK |
++                          DCTL_CGOUTNAK | DCTL_GNPINNAKSTS | DCTL_GOUTNAKSTS)) |
++                 (old & (DCTL_GNPINNAKSTS | DCTL_GOUTNAKSTS));
++
++    if (val & DCTL_SGNPINNAK) {
++        v |= DCTL_GNPINNAKSTS;
++        dwc2_set_gintsts(s, GINTSTS_GINNAKEFF, true);
++    }
++    if (val & DCTL_CGNPINNAK) {
++        v &= ~DCTL_GNPINNAKSTS;
++        dwc2_set_gintsts(s, GINTSTS_GINNAKEFF, false);
++    }
++    if (val & DCTL_SGOUTNAK) {
++        v |= DCTL_GOUTNAKSTS;
++        dwc2_set_gintsts(s, GINTSTS_GOUTNAKEFF, true);
++    }
++    if (val & DCTL_CGOUTNAK) {
++        v &= ~DCTL_GOUTNAKSTS;
++        dwc2_set_gintsts(s, GINTSTS_GOUTNAKEFF, false);
++    }
++    s->dctl = v;
++    if ((old ^ v) & DCTL_SFTDISCON) {
++        dwc2_device_update_connection(s);
++    }
++}
++
++void dwc2_dreg_write(DWC2State *s, hwaddr addr, uint64_t val64)
++{
++    uint32_t val = val64;
++
++    trace_usb_dwc2_dreg_write(addr, val);
++    if (addr >= DCFG && addr < DCFG + DWC2_DREG_SIZE) {
++        switch (addr) {
++        case DCTL:
++            dwc2_dctl_write(s, val);
++            break;
++        case DSTS:
++        case DAINT:
++            break;              /* read-only */
++        default:
++            s->dreg[(addr - DCFG) >> 2] = val;
++            break;
++        }
++    } else if ((addr >= DIEPCTL(0) && addr < DIEPCTL(DWC2_EP_BLOCKS)) ||
++               (addr >= DOEPCTL(0) && addr < DOEPCTL(DWC2_EP_BLOCKS))) {
++        bool in = addr < DOEPCTL(0);
++        int n = (addr - (in ? DIEPCTL(0) : DOEPCTL(0))) >> 5;
++        uint32_t *ep;
++
++        if (n >= DWC2_NB_EP) {
++            return;
++        }
++        ep = dwc2_ep(s, n, in);
++        switch ((addr >> 2) & 7) {
++        case DEP_CTL:
++            dwc2_epctl_write(s, n, in, val);
++            break;
++        case DEP_INT:
++            ep[DEP_INT] &= ~val;
++            if (in) {
++                ep[DEP_INT] |= DXEPINT_TXFEMP;  /* the FIFO is always empty */
++            }
++            break;
++        case DEP_TSIZ:
++        case DEP_DMA:
++            ep[(addr >> 2) & 7] = val;
++            break;
++        default:
++            break;              /* DTXFSTS, DxEPDMAB: read-only */
++        }
++    }
++    dwc2_device_run(s);
++    dwc2_device_update_irq(s);
++}
++
++/* Controller reset and bus events */
++
++void dwc2_device_reset(DWC2State *s)
++{
++    DWC2GadgetState *g = s->gadget;
++    int n;
++
++    memset(s->dreg, 0, sizeof(s->dreg));
++    memset(s->iepreg, 0, sizeof(s->iepreg));
++    memset(s->oepreg, 0, sizeof(s->oepreg));
++    s->dctl = DCTL_SFTDISCON;
++    s->iepreg[0][DEP_CTL] = DXEPCTL_USBACTEP;
++    s->oepreg[0][DEP_CTL] = DXEPCTL_USBACTEP;
++    for (n = 0; n < DWC2_NB_EP; n++) {
++        s->iepreg[n][DEP_INT] = DXEPINT_TXFEMP;
++        s->iepreg[n][DEP_TXFSTS] = 0x200;
++    }
++    if (g) {
++        dwc2_gadget_fail_packets(g);
++        timer_del(g->reset_timer);
++        g->reset_phase = 0;
++        for (n = 1; n < DWC2_NB_EP; n++) {
++            usb_ep_set_type(USB_DEVICE(g), USB_TOKEN_IN, n,
++                            USB_ENDPOINT_XFER_INVALID);
++            usb_ep_set_type(USB_DEVICE(g), USB_TOKEN_OUT, n,
++                            USB_ENDPOINT_XFER_INVALID);
++        }
++    }
++    dwc2_session_apply(s, false);
++}
++
++/* The dwc2-gadget USB device */
++
++/*
++ * USB 2.0 7.1.7.5: the host drives reset for at least T_DRST (10 ms), at
++ * the end of which the core has negotiated the speed (EnumDone), and then
++ * allows T_RSTRCY (10 ms) of recovery before its first SETUP.
++ */
++#define DWC2_T_DRST_NS      (10 * SCALE_MS)
++#define DWC2_T_RSTRCY_NS    (10 * SCALE_MS)
++
++static void dwc2_gadget_reset_timer(void *opaque)
++{
++    DWC2GadgetState *g = opaque;
++    USBDevice *dev = USB_DEVICE(g);
++    DWC2State *s = g->dwc2;
++
++    if (!s || s->gadget != g) {
++        return;
++    }
++    if (g->reset_phase == 1) {
++        set_field(&s->dsts, dev->speed == USB_SPEED_HIGH ? DSTS_ENUMSPD_HS :
++                                                           DSTS_ENUMSPD_FS,
++                  DSTS_ENUMSPD);
++        dwc2_set_gintsts(s, GINTSTS_ENUMDONE, true);
++        g->reset_phase = 2;
++        timer_mod(g->reset_timer,
++                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + DWC2_T_RSTRCY_NS);
++    } else {
++        g->reset_phase = 0;
++        dwc2_device_run(s);
++    }
++}
++
++static void dwc2_gadget_handle_reset(USBDevice *dev)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++    DWC2State *s = g->dwc2;
++
++    if (!s || s->gadget != g) {
++        return;
++    }
++    dwc2_gadget_fail_packets(g);
++    trace_usb_dwc2_gadget_bus_reset(dev->speed);
++    if (s->dsts & DSTS_SUSPSTS) {
++        /* reset signalling on a suspended bus wakes the core */
++        s->dsts &= ~DSTS_SUSPSTS;
++        dwc2_set_gintsts(s, GINTSTS_WKUPINT, true);
++    }
++    dwc2_set_gintsts(s, GINTSTS_USBRST, true);
++    g->reset_phase = 1;
++    timer_mod(g->reset_timer,
++              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + DWC2_T_DRST_NS);
++}
++
++static void dwc2_gadget_handle_control(USBDevice *dev, USBPacket *p,
++                                       int request, int value, int index,
++                                       int length, uint8_t *data)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++
++    if (g->ctrl_p) {
++        /* a new SETUP supersedes a control transfer still in progress */
++        dwc2_ctrl_complete(g, USB_RET_IOERROR);
++    }
++    g->ctrl_p = p;
++    g->ctrl_len = length;
++    g->ctrl_done = 0;
++    g->ctrl_phase = DWC2_CTRL_SETUP;
++    p->status = USB_RET_ASYNC;
++    dwc2_device_run(g->dwc2);
++}
++
++/*
++ * Isochronous endpoints move one packet per (micro)frame and never wait: a
++ * frame the guest has not armed for carries nothing.
++ */
++static void dwc2_gadget_handle_iso(DWC2GadgetState *g, USBPacket *p, int n,
++                                   bool in)
++{
++    DWC2State *s = g->dwc2;
++    g_autofree uint8_t *buf = g_malloc(MAX(p->iov.size, 1));
++    bool done, babble;
++    uint32_t moved;
++
++    if (in) {
++        moved = dwc2_ep_in_packets(s, n, buf, p->iov.size, &done, &babble);
++        usb_packet_copy(p, buf, moved);
++        p->status = moved || done ? USB_RET_SUCCESS : USB_RET_NAK;
++        if (p->status == USB_RET_NAK) {
++            /*
++             * An IN token with nothing armed: the core answers with a
++             * zero-length packet and flags NAK -- the driver starts its
++             * isochronous IN stream from this.
++             */
++            s->iepreg[n][DEP_INT] |= DXEPINT_NAKINTRPT;
++        }
++    } else {
++        if (!(s->oepreg[n][DEP_CTL] & DXEPCTL_EPENA)) {
++            /* the driver starts its ISO OUT stream from this */
++            s->oepreg[n][DEP_INT] |= DXEPINT_OUTTKNEPDIS;
++        }
++        iov_to_buf(p->iov.iov, p->iov.niov, 0, buf, p->iov.size);
++        moved = dwc2_ep_out_packets(s, n, buf, p->iov.size, &done);
++        p->actual_length = moved;
++        p->status = done ? USB_RET_SUCCESS : USB_RET_NAK;
++    }
++    dwc2_device_update_irq(s);
++}
++
++static void dwc2_gadget_handle_data(USBDevice *dev, USBPacket *p)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++    DWC2State *s = g->dwc2;
++    int n = p->ep->nr;
++    bool in = p->pid == USB_TOKEN_IN;
++    uint32_t ctl;
++    bool done;
++
++    if (n >= DWC2_NB_EP) {
++        p->status = USB_RET_STALL;
++        return;
++    }
++    ctl = dwc2_ep(s, n, in)[DEP_CTL];
++    /* an endpoint the guest has not activated does not answer: stall */
++    if (!(ctl & DXEPCTL_USBACTEP) || (ctl & DXEPCTL_STALL)) {
++        p->status = USB_RET_STALL;
++        return;
++    }
++    if ((ctl & DXEPCTL_EPTYPE_MASK) == DXEPCTL_EPTYPE_ISO) {
++        dwc2_gadget_handle_iso(g, p, n, in);
++        return;
++    }
++
++    p->status = USB_RET_SUCCESS;
++    if (in) {
++        g->in_p[n] = p;
++        done = dwc2_ep_in_run(g, n);
++    } else {
++        g->out_p[n] = p;
++        g->out_off[n] = 0;
++        done = dwc2_ep_out_run(g, n);
++    }
++    dwc2_device_update_irq(s);
++    if (done) {
++        /* finished at once: answer synchronously */
++        if (in) {
++            g->in_p[n] = NULL;
++        } else {
++            g->out_p[n] = NULL;
++        }
++        return;
++    }
++    p->status = USB_RET_ASYNC;
++}
++
++static void dwc2_gadget_cancel_packet(USBDevice *dev, USBPacket *p)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++    int n;
++
++    if (g->ctrl_p == p) {
++        g->ctrl_p = NULL;
++        g->ctrl_phase = DWC2_CTRL_IDLE;
++    }
++    for (n = 0; n < DWC2_NB_EP; n++) {
++        if (g->in_p[n] == p) {
++            g->in_p[n] = NULL;
++        }
++        if (g->out_p[n] == p) {
++            g->out_p[n] = NULL;
++        }
++    }
++}
++
++/* The port's VBUS: whether a host is connected. */
++static void dwc2_gadget_vbus_changed(USBDevice *dev)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++
++    if (g->dwc2 && g->dwc2->gadget == g) {
++        trace_usb_dwc2_gadget_vbus(usb_port_vbus(dev->port));
++        dwc2_device_update_session(g->dwc2);
++    }
++}
++
++static void dwc2_gadget_realize(USBDevice *dev, Error **errp)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++
++    if (!g->dwc2) {
++        bool ambiguous = false;
++        Object *o = object_resolve_path_type("", TYPE_DWC2_USB, &ambiguous);
++
++        if (!o || ambiguous) {
++            error_setg(errp, "dwc2-gadget: %s DWC2 controller in the "
++                       "machine; set 'controller'",
++                       ambiguous ? "more than one" : "no");
++            return;
++        }
++        g->dwc2 = DWC2_USB(o);
++    }
++    if (g->dwc2->gadget) {
++        error_setg(errp, "dwc2-gadget: the controller already has a gadget");
++        return;
++    }
++
++    /* attached (visible to the host) only while the guest pulls up */
++    dev->auto_attach = 0;
++    dev->speedmask = USB_SPEED_MASK_FULL | USB_SPEED_MASK_HIGH;
++    /* host-like: interrupt endpoints may answer asynchronously */
++    dev->flags |= 1 << USB_DEV_FLAG_IS_HOST;
++    g->connect_bh = qemu_bh_new(dwc2_gadget_connect_bh, g);
++    g->reset_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
++                                  dwc2_gadget_reset_timer, g);
++    g->dwc2->gadget = g;
++    dwc2_device_update_session(g->dwc2);
++}
++
++static void dwc2_gadget_unrealize(USBDevice *dev)
++{
++    DWC2GadgetState *g = DWC2_GADGET(dev);
++
++    if (g->dwc2 && g->dwc2->gadget == g) {
++        g->dwc2->gadget = NULL;
++        dwc2_device_update_session(g->dwc2);
++    }
++    qemu_bh_delete(g->connect_bh);
++    timer_free(g->reset_timer);
++}
++
++static const Property dwc2_gadget_properties[] = {
++    DEFINE_PROP_LINK("controller", DWC2GadgetState, dwc2, TYPE_DWC2_USB,
++                     DWC2State *),
++};
++
++static const VMStateDescription vmstate_dwc2_gadget = {
++    .name = "dwc2-gadget",
++    .unmigratable = 1,          /* host packets in flight are not migrated */
++};
++
++static void dwc2_gadget_class_init(ObjectClass *klass, const void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
++
++    uc->realize = dwc2_gadget_realize;
++    uc->unrealize = dwc2_gadget_unrealize;
++    uc->product_desc = "DWC2 USB gadget";
++    uc->handle_reset = dwc2_gadget_handle_reset;
++    uc->handle_control = dwc2_gadget_handle_control;
++    uc->handle_data = dwc2_gadget_handle_data;
++    uc->cancel_packet = dwc2_gadget_cancel_packet;
++    uc->vbus_changed = dwc2_gadget_vbus_changed;
++    dc->desc = "The guest's USB gadget on a DWC2 OTG controller";
++    dc->vmsd = &vmstate_dwc2_gadget;
++    device_class_set_props(dc, dwc2_gadget_properties);
++    set_bit(DEVICE_CATEGORY_USB, dc->categories);
++}
++
++static const TypeInfo dwc2_gadget_info = {
++    .name          = TYPE_DWC2_GADGET,
++    .parent        = TYPE_USB_DEVICE,
++    .instance_size = sizeof(DWC2GadgetState),
++    .class_init    = dwc2_gadget_class_init,
++};
++
++static void dwc2_gadget_register_types(void)
++{
++    type_register_static(&dwc2_gadget_info);
++}
++
++type_init(dwc2_gadget_register_types)
+diff --git a/hw/usb/hcd-dwc2.c b/hw/usb/hcd-dwc2.c
+index 4d2bff9..4c303cb 100644
+--- a/hw/usb/hcd-dwc2.c
++++ b/hw/usb/hcd-dwc2.c
+@@ -47,17 +47,6 @@
+ #define USB_HZ_HS       96000000
+ #define USB_FRMINTVL    12000
+ 
+-/* nifty macros from Arnon's EHCI version  */
+-#define get_field(data, field) \
+-    (((data) & field##_MASK) >> field##_SHIFT)
+-
+-#define set_field(data, newval, field) do { \
+-    uint32_t val = *(data); \
+-    val &= ~field##_MASK; \
+-    val |= ((newval) << field##_SHIFT) & field##_MASK; \
+-    *(data) = val; \
+-} while (0)
+-
+ #define get_bit(data, bitmask) \
+     (!!((data) & (bitmask)))
+ 
+@@ -96,6 +85,15 @@ static inline void dwc2_lower_global_irq(DWC2State *s, uint32_t intr)
+     }
+ }
+ 
++void dwc2_set_gintsts(DWC2State *s, uint32_t bits, bool on)
++{
++    if (on) {
++        dwc2_raise_global_irq(s, bits);
++    } else {
++        dwc2_lower_global_irq(s, bits);
++    }
++}
++
+ /*
+  * GINTSTS.HCHINT is level-sensitive: it is set exactly while some channel
+  * interrupt in HAINT is unmasked in HAINTMSK, so it must follow changes to
+@@ -693,6 +691,12 @@ static uint64_t dwc2_glbreg_read(void *ptr, hwaddr addr, int index,
+     val = s->glbreg[index];
+ 
+     switch (addr) {
++    case GINTSTS:
++        val &= ~GINTSTS_CURMODE_HOST;
++        if (dwc2_is_host_role(s)) {
++            val |= GINTSTS_CURMODE_HOST;
++        }
++        break;
+     case GRSTCTL:
+         /* clear any self-clearing bits that were set */
+         val &= ~(GRSTCTL_TXFFLSH | GRSTCTL_RXFFLSH | GRSTCTL_IN_TKNQ_FLSH |
+@@ -736,6 +740,10 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
+                       GOTGCTL_ASESVLD | GOTGCTL_DBNC_SHORT | GOTGCTL_CONID_B |
+                       GOTGCTL_HSTNEGSCS | GOTGCTL_SESREQSCS);
+         break;
++    case GOTGINT:
++        /* write-1-to-clear; GINTSTS.OTGInt summarises it */
++        val = old & ~val;
++        break;
+     case GAHBCFG:
+         if ((val & GAHBCFG_GLBL_INTR_EN) && !(old & GAHBCFG_GLBL_INTR_EN)) {
+             iflg = 1;
+@@ -801,6 +809,21 @@ static void dwc2_glbreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
+     trace_usb_dwc2_glbreg_write(addr, glbregnm[index], orig, old, val);
+     *mmio = val;
+ 
++    switch (addr) {
++    case GOTGINT:
++        dwc2_set_gintsts(s, GINTSTS_OTGINT, s->gotgint != 0);
++        break;
++    case GUSBCFG:
++        if ((old ^ val) & (GUSBCFG_FORCEHOSTMODE | GUSBCFG_FORCEDEVMODE)) {
++            /* the forced role changes whether the gadget is connected */
++            dwc2_device_update_connection(s);
++            dwc2_device_run(s);
++        }
++        break;
++    default:
++        break;
++    }
++
+     if (iflg) {
+         dwc2_update_irq(s);
+     }
+@@ -812,13 +835,13 @@ static uint64_t dwc2_fszreg_read(void *ptr, hwaddr addr, int index,
+     DWC2State *s = ptr;
+     uint32_t val;
+ 
+-    if (addr != HPTXFSIZ) {
++    if (addr < HPTXFSIZ || addr > DPTXFSIZN(15)) {
+         qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset 0x%"HWADDR_PRIx"\n",
+                       __func__, addr);
+         return 0;
+     }
+ 
+-    val = s->fszreg[index];
++    val = index ? s->dptxfsiz[index - 1] : s->fszreg[index];
+ 
+     trace_usb_dwc2_fszreg_read(addr, val);
+     return val;
+@@ -832,13 +855,13 @@ static void dwc2_fszreg_write(void *ptr, hwaddr addr, int index, uint64_t val,
+     uint32_t *mmio;
+     uint32_t old;
+ 
+-    if (addr != HPTXFSIZ) {
++    if (addr < HPTXFSIZ || addr > DPTXFSIZN(15)) {
+         qemu_log_mask(LOG_GUEST_ERROR, "%s: Bad offset 0x%"HWADDR_PRIx"\n",
+                       __func__, addr);
+         return;
+     }
+ 
+-    mmio = &s->fszreg[index];
++    mmio = index ? &s->dptxfsiz[index - 1] : &s->fszreg[index];
+     old = *mmio;
+ 
+     trace_usb_dwc2_fszreg_write(addr, orig, old, val);
+@@ -1122,11 +1145,11 @@ static uint64_t dwc2_hsotg_read(void *ptr, hwaddr addr, unsigned size)
+     case HSOTG_REG(0x000) ... HSOTG_REG(0x0fc):
+         val = dwc2_glbreg_read(ptr, addr, (addr - HSOTG_REG(0x000)) >> 2, size);
+         break;
+-    case HSOTG_REG(0x100):
++    case HSOTG_REG(0x100) ... HSOTG_REG(0x13c):
+         val = dwc2_fszreg_read(ptr, addr, (addr - HSOTG_REG(0x100)) >> 2, size);
+         break;
+-    case HSOTG_REG(0x104) ... HSOTG_REG(0x3fc):
+-        /* Gadget-mode registers, just return 0 for now */
++    case HSOTG_REG(0x140) ... HSOTG_REG(0x3fc):
++        /* reserved */
+         val = 0;
+         break;
+     case HSOTG_REG(0x400) ... HSOTG_REG(0x4fc):
+@@ -1136,8 +1159,7 @@ static uint64_t dwc2_hsotg_read(void *ptr, hwaddr addr, unsigned size)
+         val = dwc2_hreg1_read(ptr, addr, (addr - HSOTG_REG(0x500)) >> 2, size);
+         break;
+     case HSOTG_REG(0x800) ... HSOTG_REG(0xdfc):
+-        /* Gadget-mode registers, just return 0 for now */
+-        val = 0;
++        val = dwc2_dreg_read(ptr, addr);
+         break;
+     case HSOTG_REG(0xe00) ... HSOTG_REG(0xffc):
+         val = dwc2_pcgreg_read(ptr, addr, (addr - HSOTG_REG(0xe00)) >> 2, size);
+@@ -1159,11 +1181,11 @@ static void dwc2_hsotg_write(void *ptr, hwaddr addr, uint64_t val,
+     case HSOTG_REG(0x000) ... HSOTG_REG(0x0fc):
+         dwc2_glbreg_write(ptr, addr, (addr - HSOTG_REG(0x000)) >> 2, val, size);
+         break;
+-    case HSOTG_REG(0x100):
++    case HSOTG_REG(0x100) ... HSOTG_REG(0x13c):
+         dwc2_fszreg_write(ptr, addr, (addr - HSOTG_REG(0x100)) >> 2, val, size);
+         break;
+-    case HSOTG_REG(0x104) ... HSOTG_REG(0x3fc):
+-        /* Gadget-mode registers, do nothing for now */
++    case HSOTG_REG(0x140) ... HSOTG_REG(0x3fc):
++        /* reserved */
+         break;
+     case HSOTG_REG(0x400) ... HSOTG_REG(0x4fc):
+         dwc2_hreg0_write(ptr, addr, (addr - HSOTG_REG(0x400)) >> 2, val, size);
+@@ -1172,7 +1194,7 @@ static void dwc2_hsotg_write(void *ptr, hwaddr addr, uint64_t val,
+         dwc2_hreg1_write(ptr, addr, (addr - HSOTG_REG(0x500)) >> 2, val, size);
+         break;
+     case HSOTG_REG(0x800) ... HSOTG_REG(0xdfc):
+-        /* Gadget-mode registers, do nothing for now */
++        dwc2_dreg_write(ptr, addr, val);
+         break;
+     case HSOTG_REG(0xe00) ... HSOTG_REG(0xffc):
+         dwc2_pcgreg_write(ptr, addr, (addr - HSOTG_REG(0xe00)) >> 2, val, size);
+@@ -1299,6 +1321,23 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
+     s->gintsts2 = 0;
+ 
+     s->hptxfsiz = 500 << FIFOSIZE_DEPTH_SHIFT;
++    /*
++     * Device IN endpoint TX FIFOs: their reset depths are the maximum each
++     * may be given (the dwc2 driver checks g-tx-fifo-size against them).
++     * BCM2835: 512 words for FIFOs 1-5 and 768 for 6-7, laid out after the
++     * RX and non-periodic TX FIFOs.
++     */
++    memset(s->dptxfsiz, 0, sizeof(s->dptxfsiz));
++    {
++        uint32_t start = s->grxfsiz + (s->gnptxfsiz >> FIFOSIZE_DEPTH_SHIFT);
++
++        for (i = 0; i < DWC2_NB_EP - 1; i++) {
++            uint32_t depth = i < 5 ? 512 : 768;
++
++            s->dptxfsiz[i] = (depth << FIFOSIZE_DEPTH_SHIFT) | start;
++            start += depth;
++        }
++    }
+ 
+     s->hcfg = 2 << HCFG_RESVALID_SHIFT;
+     s->hfir = 60000;
+@@ -1320,6 +1359,9 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
+     for (i = 0; i < DWC2_NB_CHAN; i++) {
+         s->packet[i].needs_service = false;
+     }
++
++    /* device registers; the ID pin and session from the OTG cable */
++    dwc2_device_reset(s);
+ }
+ 
+ static void dwc2_reset_hold(Object *obj, ResetType type)
+@@ -1360,6 +1402,17 @@ static void dwc2_realize(DeviceState *dev, Error **errp)
+     DWC2State *s = DWC2_USB(dev);
+     Object *obj;
+ 
++    if (!s->otg_cable_str || !strcmp(s->otg_cable_str, "auto")) {
++        s->otg_cable = DWC2_CABLE_AUTO;
++    } else if (!strcmp(s->otg_cable_str, "host")) {
++        s->otg_cable = DWC2_CABLE_HOST;
++    } else if (!strcmp(s->otg_cable_str, "device")) {
++        s->otg_cable = DWC2_CABLE_DEVICE;
++    } else {
++        error_setg(errp, "dwc2: otg-cable must be auto, host or device");
++        return;
++    }
++
+     obj = object_property_get_link(OBJECT(dev), "dma-mr", &error_abort);
+ 
+     s->dma_mr = MEMORY_REGION(obj);
+@@ -1424,6 +1477,20 @@ static const VMStateDescription vmstate_dwc2_state_packet = {
+     },
+ };
+ 
++static const VMStateDescription vmstate_dwc2_device = {
++    .name = "dwc2/device",
++    .version_id = 1,
++    .minimum_version_id = 1,
++    .fields = (const VMStateField[]) {
++        VMSTATE_UINT32_ARRAY(dptxfsiz, DWC2State, 15),
++        VMSTATE_UINT32_ARRAY(dreg, DWC2State,
++                             DWC2_DREG_SIZE / sizeof(uint32_t)),
++        VMSTATE_UINT32_2DARRAY(iepreg, DWC2State, DWC2_NB_EP, 8),
++        VMSTATE_UINT32_2DARRAY(oepreg, DWC2State, DWC2_NB_EP, 8),
++        VMSTATE_END_OF_LIST()
++    },
++};
++
+ const VMStateDescription vmstate_dwc2_state = {
+     .name = "dwc2",
+     .version_id = 1,
+@@ -1457,11 +1524,21 @@ const VMStateDescription vmstate_dwc2_state = {
+                               DWC2_MAX_XFER_SIZE),
+ 
+         VMSTATE_END_OF_LIST()
++    },
++    .subsections = (const VMStateDescription * const []) {
++        &vmstate_dwc2_device,
++        NULL
+     }
+ };
+ 
+ static const Property dwc2_usb_properties[] = {
+     DEFINE_PROP_UINT32("usb_version", DWC2State, usb_version, 2),
++    /*
++     * The plug in the OTG port: "host" (A-plug, the controller is the
++     * host), "device" (B-plug, it is a peripheral) or "auto": device when
++     * a dwc2-gadget exists for the controller, otherwise host.
++     */
++    DEFINE_PROP_STRING("otg-cable", DWC2State, otg_cable_str),
+ };
+ 
+ static void dwc2_class_init(ObjectClass *klass, const void *data)
+diff --git a/hw/usb/hcd-dwc2.h b/hw/usb/hcd-dwc2.h
+index 6887766..07185d3 100644
+--- a/hw/usb/hcd-dwc2.h
++++ b/hw/usb/hcd-dwc2.h
+@@ -29,11 +29,32 @@
+ #define DWC2_MMIO_SIZE      0x11000
+ 
+ #define DWC2_NB_CHAN        8       /* Number of host channels */
++#define DWC2_NB_EP          8       /* Device endpoints incl. EP0 */
++#define DWC2_EP_BLOCKS      16      /* DIEP/DOEP register blocks */
+ #define DWC2_MAX_XFER_SIZE  65536   /* Max transfer size expected in HCTSIZ */
+ 
+ typedef struct DWC2Packet DWC2Packet;
+ typedef struct DWC2State DWC2State;
+ typedef struct DWC2Class DWC2Class;
++typedef struct DWC2GadgetState DWC2GadgetState;
++
++/* The OTG connector's plug (otg-cable property) */
++enum {
++    DWC2_CABLE_AUTO,        /* device if a dwc2-gadget exists, else host */
++    DWC2_CABLE_HOST,        /* A-plug: ID grounded */
++    DWC2_CABLE_DEVICE,      /* B-plug: ID floating */
++};
++
++/* nifty macros from Arnon's EHCI version  */
++#define get_field(data, field) \
++    (((data) & field##_MASK) >> field##_SHIFT)
++
++#define set_field(data, newval, field) do { \
++    uint32_t val = *(data); \
++    val &= ~field##_MASK; \
++    val |= ((newval) << field##_SHIFT) & field##_MASK; \
++    *(data) = val; \
++} while (0)
+ 
+ enum async_state {
+     DWC2_ASYNC_NONE = 0,
+@@ -113,6 +134,9 @@ struct DWC2State {
+         };
+     };
+ 
++    /* DPTXFSIZn (0x104-0x13c), after HPTXFSIZ */
++    uint32_t dptxfsiz[15];
++
+     union {
+ #define DWC2_HREG0_SIZE     0x44
+         uint32_t hreg0[DWC2_HREG0_SIZE / sizeof(uint32_t)];
+@@ -141,6 +165,33 @@ struct DWC2State {
+ #define hcdma(_ch)      hreg1[((_ch) << 3) + 5] /* 514, 534, ... */
+ #define hcdmab(_ch)     hreg1[((_ch) << 3) + 7] /* 51c, 53c, ... */
+ 
++    union {
++#define DWC2_DREG_SIZE      0x40
++        uint32_t dreg[DWC2_DREG_SIZE / sizeof(uint32_t)];
++        struct {
++            uint32_t dcfg;          /* 800 */
++            uint32_t dctl;          /* 804 */
++            uint32_t dsts;          /* 808 */
++            uint32_t rsvd2;         /* 80c */
++            uint32_t diepmsk;       /* 810 */
++            uint32_t doepmsk;       /* 814 */
++            uint32_t daint;         /* 818 */
++            uint32_t daintmsk;      /* 81c */
++            uint32_t dtknqr1;       /* 820 */
++            uint32_t dtknqr2;       /* 824 */
++            uint32_t dvbusdis;      /* 828 */
++            uint32_t dvbuspulse;    /* 82c */
++            uint32_t dthrctl;       /* 830 */
++            uint32_t diepempmsk;    /* 834 */
++            uint32_t deachint;      /* 838 */
++            uint32_t deachintmsk;   /* 83c */
++        };
++    };
++
++    /* DIEPCTLn.. (0x900 + n * 0x20) and DOEPCTLn.. (0xb00 + n * 0x20) */
++    uint32_t iepreg[DWC2_NB_EP][8];
++    uint32_t oepreg[DWC2_NB_EP][8];
++
+     union {
+ #define DWC2_PCGREG_SIZE    0x08
+         uint32_t pcgreg[DWC2_PCGREG_SIZE / sizeof(uint32_t)];
+@@ -163,6 +214,9 @@ struct DWC2State {
+     int64_t usb_frame_time;
+     int64_t usb_bit_time;
+     uint32_t usb_version;
++    char *otg_cable_str;
++    uint32_t otg_cable;
++    DWC2GadgetState *gadget;
+     uint16_t frame_number;
+     uint16_t fi;
+     uint16_t next_chan;
+@@ -183,4 +237,17 @@ struct DWC2Class {
+ #define TYPE_DWC2_USB   "dwc2-usb"
+ OBJECT_DECLARE_TYPE(DWC2State, DWC2Class, DWC2_USB)
+ 
++/* hcd-dwc2.c */
++void dwc2_set_gintsts(DWC2State *s, uint32_t bits, bool on);
++
++/* dwc2-gadget.c: device (peripheral) mode */
++bool dwc2_is_host_role(DWC2State *s);
++void dwc2_device_reset(DWC2State *s);
++void dwc2_device_update_session(DWC2State *s);
++void dwc2_device_update_connection(DWC2State *s);
++void dwc2_device_update_irq(DWC2State *s);
++void dwc2_device_run(DWC2State *s);
++uint64_t dwc2_dreg_read(DWC2State *s, hwaddr addr);
++void dwc2_dreg_write(DWC2State *s, hwaddr addr, uint64_t val);
++
+ #endif
+diff --git a/hw/usb/meson.build b/hw/usb/meson.build
+index 2cce3f3..2356709 100644
+--- a/hw/usb/meson.build
++++ b/hw/usb/meson.build
+@@ -24,7 +24,7 @@ system_ss.add(when: 'CONFIG_USB_XHCI', if_true: files('hcd-xhci.c'))
+ system_ss.add(when: 'CONFIG_USB_XHCI_PCI', if_true: files('hcd-xhci-pci.c'))
+ system_ss.add(when: 'CONFIG_USB_XHCI_SYSBUS', if_true: files('hcd-xhci-sysbus.c'))
+ system_ss.add(when: 'CONFIG_USB_XHCI_NEC', if_true: files('hcd-xhci-nec.c'))
+-system_ss.add(when: 'CONFIG_USB_DWC2', if_true: files('hcd-dwc2.c'))
++system_ss.add(when: 'CONFIG_USB_DWC2', if_true: files('hcd-dwc2.c', 'dwc2-gadget.c'))
+ system_ss.add(when: 'CONFIG_USB_DWC3', if_true: files('hcd-dwc3.c'))
+ system_ss.add(when: 'CONFIG_USBIP_SERVER', if_true: files('usbip-server.c'))
+ system_ss.add(when: 'CONFIG_USB_CHIPIDEA', if_true: files('chipidea.c'))
+diff --git a/hw/usb/trace-events b/hw/usb/trace-events
+index 1de3a6a..3bbc35e 100644
+--- a/hw/usb/trace-events
++++ b/hw/usb/trace-events
+@@ -378,6 +378,16 @@ canokey_handle_data_in(uint8_t ep_in, uint32_t in_len) "ep %d len %d"
+ canokey_realize(void)
+ canokey_unrealize(void)
+ 
++# dwc2-gadget.c
++usb_dwc2_dreg_read(uint64_t addr, uint32_t val) "0x%04" PRIx64 " -> 0x%08x"
++usb_dwc2_dreg_write(uint64_t addr, uint32_t val) "0x%04" PRIx64 " <- 0x%08x"
++usb_dwc2_gadget_connect(bool on) "pull-up visible to the host: %d"
++usb_dwc2_gadget_vbus(bool on) "vbus %d"
++usb_dwc2_gadget_bus_reset(int speed) "bus reset, speed %d"
++usb_dwc2_gadget_setup(uint64_t setup) "SETUP 0x%016" PRIx64
++usb_dwc2_gadget_xfercompl(int ep, bool in) "EP%d %d XferCompl"
++usb_dwc2_gadget_ctrl_complete(int status, uint32_t len) "control done: status %d, %u bytes"
++
+ # usbip-server.c
+ usbip_server_connection(const char *event) "%s"
+ usbip_server_op(uint16_t code) "code=0x%04x"
+-- 
+2.47.3
+
