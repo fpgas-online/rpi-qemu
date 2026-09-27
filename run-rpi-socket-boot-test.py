@@ -235,7 +235,7 @@ def run_test():
 
     # Optional: timing-dependent or no-peer
     optional_checks = [
-        ("USB serial",            "ttyUSB"),
+        ("USB serial",            "ttyUSB0"),
         ("DHCP lease",            "lease of"),
         ("HTTPS fetch",           "HTTPS fetch: SUCCESS"),
     ]
