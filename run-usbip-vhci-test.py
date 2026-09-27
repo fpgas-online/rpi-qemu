@@ -124,7 +124,7 @@ def free_hs_port():
     raise RuntimeError("no free high-speed vhci port")
 
 
-def find_usb_device(timeout):
+def find_usb_device(timeout, vid=VID, pid=PID):
     """The imported device's sysfs directory (under vhci_hcd)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -134,7 +134,7 @@ def find_usb_device(timeout):
                        (dev / "idProduct").read_text().strip())
             except OSError:
                 continue
-            if ids == (VID, PID) and "vhci_hcd" in str(dev.resolve()):
+            if ids == (vid, pid) and "vhci_hcd" in str(dev.resolve()):
                 return dev
         time.sleep(0.2)
     return None

@@ -226,7 +226,7 @@ jobs:
     name: USB/IP interop (vhci-hcd)
     needs: [build-static]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -249,6 +249,37 @@ jobs:
           tar xzf tmp/static/qemu-rpi-static-linux-amd64.tar.gz -C tmp/static
           sudo QEMU_OVERRIDE="$PWD/tmp/static/qemu-rpi-system-aarch64-static" \
             python3 run-usbip-vhci-test.py
+
+      # The emulated Pi Zero's USB gadget (stock kernel, dwc2 peripheral
+      # mode) on this host's kernel, through vhci-hcd (#22).
+      - name: Fetch the Raspberry Pi Zero kernel, DTB and gadget modules
+        run: |
+          FW="https://raw.githubusercontent.com/raspberrypi/firmware/bead686816848038563a542dc854346ab13253a2"
+          mkdir -p test-images/rpi0/modules
+          wget -q -O test-images/rpi0/kernel.img "$FW/boot/kernel.img"
+          wget -q -O test-images/rpi0/bcm2708-rpi-zero-w.dtb "$FW/boot/bcm2708-rpi-zero-w.dtb"
+          wget -q -O test-images/rpi0/dwc2.dtbo "$FW/boot/overlays/dwc2.dtbo"
+          # Ubuntu 24.04's fdtoverlay (dtc 1.7.0) fails on this overlay
+          # (FDT_ERR_NOTFOUND); use Debian trixie's (1.7.2), as the boot test
+          docker run --rm -v "$PWD/test-images/rpi0:/w" -w /w debian:trixie sh -c \
+            'apt-get update -qq && apt-get install -y -qq device-tree-compiler &&
+             fdtoverlay -i bcm2708-rpi-zero-w.dtb -o bcm2708-rpi-zero-w-dwc2.dtb dwc2.dtbo'
+          K="$FW/modules/6.18.52+/kernel/drivers/usb"
+          for p in roles/roles dwc2/dwc2 gadget/libcomposite \
+                   gadget/function/u_serial gadget/function/usb_f_acm \
+                   gadget/function/u_ether gadget/function/usb_f_ecm \
+                   gadget/function/usb_f_ncm gadget/function/usb_f_mass_storage \
+                   gadget/function/usb_f_ss_lb; do
+            wget -q -O "test-images/rpi0/modules/$(basename $p).ko.xz" "$K/$p.ko.xz"
+          done
+          wget -q -O test-images/alpine-minirootfs-armhf.tar.gz \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/armhf/alpine-minirootfs-3.21.3-armhf.tar.gz"
+          sudo python3 build-initramfs.py --target rpi0-gadget
+
+      - name: Run the Pi Zero gadget on the host's vhci-hcd
+        run: |
+          sudo QEMU_OVERRIDE="$PWD/tmp/static/qemu-rpi-system-aarch64-static" \
+            python3 run-rpi0-gadget-vhci-test.py
 
   stage-apt:
     # Gather this run's .debs (plus the pxeboot firmware deb, built here) into
