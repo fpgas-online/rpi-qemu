@@ -1,4 +1,4 @@
-From 1b9bd4d076d59dccad5c568f0ef7a784ce96b79b Mon Sep 17 00:00:00 2001
+From 21e7e112adf8490f97a51e3a60e2feda77739c18 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 00:24:03 +0930
 Subject: [PATCH] hw/usb: add a USB/IP server device
@@ -54,10 +54,10 @@ Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
  hw/usb/bus.c                  |    3 +-
  hw/usb/meson.build            |    1 +
  hw/usb/trace-events           |    8 +
- hw/usb/usbip-server.c         | 1082 +++++++++++++++++++++++++++++++++
+ hw/usb/usbip-server.c         | 1108 +++++++++++++++++++++++++++++++++
  include/hw/usb/usb.h          |    2 +
  include/hw/usb/usbip-server.h |   14 +
- 9 files changed, 1119 insertions(+), 1 deletion(-)
+ 9 files changed, 1145 insertions(+), 1 deletion(-)
  create mode 100644 hw/usb/usbip-server.c
  create mode 100644 include/hw/usb/usbip-server.h
 
@@ -159,10 +159,10 @@ index 0d4318d..1de3a6a 100644
 +usbip_server_enumerate(int step, int status) "step=%d status=%d"
 diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
 new file mode 100644
-index 0000000..5a5b4d8
+index 0000000..84a8950
 --- /dev/null
 +++ b/hw/usb/usbip-server.c
-@@ -0,0 +1,1082 @@
+@@ -0,0 +1,1108 @@
 +/*
 + * USB/IP server: exports the QEMU USB device on its port over USB/IP
 + *
@@ -573,12 +573,38 @@ index 0000000..5a5b4d8
 +    }
 +}
 +
++/*
++ * The packet the device was working on was cancelled: QEMU's core only
++ * starts a queued packet when the one before it completes, so take the
++ * ones queued behind it on @ep back, in order, ahead of anything waiting.
++ */
++static void usbip_requeue_behind(USBIPServerState *s, USBEndpoint *ep)
++{
++    USBIPURB *u, *prev;
++
++    QTAILQ_FOREACH_REVERSE_SAFE(u, &s->inflight, next, prev) {
++        if (u->packet.ep == ep && u->packet.state == USB_PACKET_QUEUED) {
++            QTAILQ_REMOVE(&s->inflight, u, next);
++            usb_cancel_packet(&u->packet);
++            u->state = USBIP_URB_WAITING;
++            QTAILQ_INSERT_HEAD(&s->waiting[usbip_urb_key(u)], u, next);
++        }
++    }
++    qemu_bh_schedule(s->retry_bh);
++}
++
 +/* Take an URB off its list, cancelling it on the device if it holds it. */
 +static void usbip_urb_unlink(USBIPServerState *s, USBIPURB *u)
 +{
 +    if (u->state == USBIP_URB_INFLIGHT) {
++        USBEndpoint *ep = u->packet.ep;
++        bool held = u->packet.state == USB_PACKET_ASYNC;
++
 +        QTAILQ_REMOVE(&s->inflight, u, next);
 +        usb_cancel_packet(&u->packet);
++        if (held) {
++            usbip_requeue_behind(s, ep);
++        }
 +    } else {
 +        QTAILQ_REMOVE(&s->waiting[usbip_urb_key(u)], u, next);
 +    }
