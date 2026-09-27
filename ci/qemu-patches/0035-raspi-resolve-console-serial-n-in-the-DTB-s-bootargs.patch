@@ -1,0 +1,57 @@
+From ee70e01c8019b62e145c8a8777d2f34bd13deb9a Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 22:08:53 +0930
+Subject: [PATCH] raspi: resolve console=serial<n> in the DTB's bootargs too
+
+The command line fixup prepended the DTB file's own /chosen/bootargs to
+-append verbatim and only rewrote console=serial<n> in the -append part,
+so a DTB whose bootargs name console=serial0 got console=ttyS0 without
+-append but kept the unusable console=serial0 with it.  Build the whole
+command line first and rewrite over all of it.  (Stock Raspberry Pi DTBs
+carry no console= in /chosen/bootargs, so real images were unaffected;
+found in review.)  Checked with -machine dumpdtb on a DTB whose bootargs
+are "coherent_pool=1M console=serial0,115200": no -append, -append
+"earlycon" and -append 'console=serial1 dyndbg="a  b"' all resolve it to
+console=ttyS0,115200 (the last also serial1 -> ttyAMA1, spacing kept).
+---
+ hw/arm/raspi.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index 611bb11..a9cca07 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -322,6 +322,7 @@ static void raspi_fixup_cmdline(const struct arm_boot_info *info, void *fdt)
+     static const char console[] = "console=serial";
+     g_autoptr(GString) out = g_string_new(NULL);
+     g_autofree char *dtb_args = NULL;
++    g_autofree char *cmdline = NULL;
+     const char *bootargs, *p;
+     int chosen;
+ 
+@@ -334,17 +335,17 @@ static void raspi_fixup_cmdline(const struct arm_boot_info *info, void *fdt)
+     /* boot.c only replaces the DTB's bootargs when -append is non-empty. */
+     if (info->kernel_cmdline && *info->kernel_cmdline && info->dtb_filename) {
+         dtb_args = raspi_dtb_file_bootargs(info->dtb_filename);
+-        if (dtb_args && *dtb_args) {
+-            g_string_append_printf(out, "%s ", dtb_args);
+-        }
+     }
++    cmdline = dtb_args && *dtb_args ? g_strconcat(dtb_args, " ", bootargs, NULL)
++                                    : g_strdup(bootargs);
+ 
+-    for (p = bootargs; *p; ) {
++    /* Resolve console=serial<n> wherever it appears, DTB args included. */
++    for (p = cmdline; *p; ) {
+         const char *tail;
+         unsigned long n;
+         RaspiUartKind kind;
+ 
+-        if ((p == bootargs || g_ascii_isspace(p[-1])) &&
++        if ((p == cmdline || g_ascii_isspace(p[-1])) &&
+             g_str_has_prefix(p, console) &&
+             g_ascii_isdigit(p[strlen(console)]) &&
+             qemu_strtoul(p + strlen(console), &tail, 10, &n) == 0 &&
+-- 
+2.47.3
+

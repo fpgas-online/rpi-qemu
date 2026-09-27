@@ -205,6 +205,10 @@ def run_test():
             time.sleep(0.3)
         time.sleep(2)
 
+        # U-Boot sets serial# from the GET_BOARD_SERIAL firmware property
+        # (rpi-qemu#25): it must be the machine's board-serial (default).
+        send("printenv serial#", 2)
+
         # === Phase 2: DHCP + TFTP ===
         print("--- Phase 2: DHCP + TFTP ---")
         send("dhcp", 3)
@@ -262,6 +266,7 @@ def run_test():
     # Required checks (must all pass)
     checks = [
         ("U-Boot DHCP",         "DHCP client bound"),
+        ("Board serial (#25)",  "serial#=0000000012345678"),
         ("TFTP transfers",      "Bytes transferred"),
         ("booti starts kernel", "Starting kernel"),
         ("Kernel boots",        "Booting Linux on physical CPU"),
@@ -304,7 +309,7 @@ def run_test():
     print()
     for line in text.split("\n"):
         s = line.strip()
-        for kw in ["DHCP client bound", "Bytes transferred",
+        for kw in ["serial#=", "DHCP client bound", "Bytes transferred",
                     "Starting kernel", "Booting Linux",
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
                     "Link is Up", "lease of",

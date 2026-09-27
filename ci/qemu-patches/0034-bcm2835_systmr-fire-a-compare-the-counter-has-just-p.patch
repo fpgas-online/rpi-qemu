@@ -1,0 +1,65 @@
+From 85852584aa53b6ee18b76e9b2a1acbae4c606e1d Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 22:08:53 +0930
+Subject: [PATCH] bcm2835_systmr: fire a compare the counter has just passed
+
+The system timer matches on equality with the counter's lower 32 bits,
+so a compare value the counter has already passed only matches after it
+wraps, ~71 minutes later.  Linux programs "counter + delta" with a
+minimum delta of 15 us (0xf ticks), which real hardware writes long
+before the deadline; under emulation the vCPU can take longer than that
+between reading the counter and writing the compare.  The compare then
+lands just behind the counter and the guest waits over an hour for its
+next tick: on raspi0 about one boot in thirty stopped in cpu_v6_do_idle
+with CS=0, C3 in the past, and a trace ending
+
+  bcm2835_systmr_run timer #3 expiring in 9842 us
+  bcm2835_systmr_run timer #3 expiring in 4294967294 us
+
+Treat a compare in the past half of the 32-bit range as already due, as
+time_after() would.  This differs from the hardware only for compare
+values set 35-71 minutes ahead, which Linux never programs (it keeps idle
+periods well within half the counter's wrap for timekeeping).  With it,
+60 resets during usb-net traffic gave 61 good boots; the trace shows 5
+compares written in the past that fired immediately instead of hanging.
+---
+ hw/timer/bcm2835_systmr.c | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/hw/timer/bcm2835_systmr.c b/hw/timer/bcm2835_systmr.c
+index 06a919b..32599b2 100644
+--- a/hw/timer/bcm2835_systmr.c
++++ b/hw/timer/bcm2835_systmr.c
+@@ -73,7 +73,7 @@ static void bcm2835_systmr_write(void *opaque, hwaddr offset,
+     BCM2835SystemTimerState *s = BCM2835_SYSTIMER(opaque);
+     int index;
+     uint32_t value = value64;
+-    uint32_t triggers_delay_us;
++    int32_t triggers_delay_us;
+     uint64_t now;
+ 
+     trace_bcm2835_systmr_write(offset, value);
+@@ -91,8 +91,18 @@ static void bcm2835_systmr_write(void *opaque, hwaddr offset,
+         index = (offset - A_COMPARE0) >> 2;
+         s->reg.compare[index] = value;
+         now = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
+-        /* Compare lower 32-bits of the free-running counter. */
+-        triggers_delay_us = value - now;
++        /*
++         * The hardware matches on equality with the counter's lower 32
++         * bits, so a compare value the counter has already passed only
++         * matches after it wraps, ~71 minutes later.  Guests program
++         * "counter + small delta" (Linux: at least 15 us), which real
++         * hardware writes long before the deadline; under emulation the
++         * vCPU can take longer than that between reading the counter and
++         * writing the compare, leaving it just behind and the guest
++         * waiting over an hour for its next timer tick.  Treat a compare
++         * in the past half of the 32-bit range as already due.
++         */
++        triggers_delay_us = MAX((int32_t)(value - (uint32_t)now), 0);
+         trace_bcm2835_systmr_run(index, triggers_delay_us);
+         timer_mod(&s->tmr[index].timer, now + triggers_delay_us);
+         break;
+-- 
+2.47.3
+

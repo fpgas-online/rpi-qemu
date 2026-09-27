@@ -1,0 +1,107 @@
+From daa39dfc9139f6d6cdbf59d4e72f08458683eeba Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 19:21:08 +0930
+Subject: [PATCH] raspi: publish the board serial and revision in the device
+ tree
+
+Linux doesn't ask the firmware for the board identity; it reads what the
+firmware writes into the device tree.  32-bit Raspberry Pi kernels set
+/proc/cpuinfo's Revision and Serial from /system/linux,revision and
+/system/linux,serial (arch/arm/mach-bcm/board_bcm2835.c), and Raspberry
+Pi documents the full 64-bit serial as available in
+/proc/device-tree/serial-number.  The shipped DTBs have none of these --
+the firmware adds them -- so under -kernel/-dtb a raspi0 guest saw
+"Revision: 0000", "Serial: 0000000000000000" and no serial-number.
+
+Add them in the modify_dtb hooks of the raspi0-3 and raspi4b machines,
+from the machine's board revision and board-serial property: create
+/system if needed, set linux,revision (u32) and linux,serial (u64), and
+set /serial-number to the serial as 16 hex digits.  A failure to update
+the DTB is reported with warn_report().
+
+With -M raspi0,board-serial=0x00000000c0ffee01 and the Zero W's
+kernel.img/DTB: /proc/cpuinfo shows "Revision : 920092" and "Serial :
+00000000c0ffee01", and /proc/device-tree/serial-number is
+"00000000c0ffee01".
+
+Fixes: https://github.com/fpgas-online/rpi-qemu/issues/25
+---
+ hw/arm/raspi.c                  | 31 +++++++++++++++++++++++++++++++
+ hw/arm/raspi4b.c                |  2 ++
+ include/hw/arm/raspi_platform.h |  1 +
+ 3 files changed, 34 insertions(+)
+
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index 5a7db0a..611bb11 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -364,10 +364,41 @@ static void raspi_fixup_cmdline(const struct arm_boot_info *info, void *fdt)
+     }
+ }
+ 
++/*
++ * The firmware publishes the board's identity in the device tree it hands
++ * to Linux: /system/linux,revision and /system/linux,serial, which 32-bit
++ * Raspberry Pi kernels turn into /proc/cpuinfo's Revision and Serial
++ * (arch/arm/mach-bcm/board_bcm2835.c), and /serial-number, where the
++ * 64-bit serial is documented to be available.  The shipped DTBs have
++ * none of these, so add them from the machine's board revision and
++ * board-serial property.
++ */
++void raspi_fixup_board_identity(const struct arm_boot_info *info, void *fdt)
++{
++    RaspiBaseMachineState *s = container_of(info, RaspiBaseMachineState,
++                                            binfo);
++    RaspiBaseMachineClass *mc = RASPI_BASE_MACHINE_GET_CLASS(s);
++    g_autofree char *serial = g_strdup_printf("%016" PRIx64,
++                                              s->board_serial);
++    int node;
++
++    node = fdt_path_offset(fdt, "/system");
++    if (node < 0) {
++        node = fdt_add_subnode(fdt, 0, "system");
++    }
++    if (node < 0 ||
++        fdt_setprop_u32(fdt, node, "linux,revision", mc->board_rev) < 0 ||
++        fdt_setprop_u64(fdt, node, "linux,serial", s->board_serial) < 0 ||
++        fdt_setprop_string(fdt, 0, "serial-number", serial) < 0) {
++        warn_report("raspi: could not add the board identity to the DTB");
++    }
++}
++
+ static void raspi_modify_dtb(const struct arm_boot_info *info, void *fdt)
+ {
+     raspi_fixup_serial0_pins(fdt);
+     raspi_fixup_cmdline(info, fdt);
++    raspi_fixup_board_identity(info, fdt);
+ }
+ 
+ static void setup_boot(MachineState *machine, ARMCPU *cpu,
+diff --git a/hw/arm/raspi4b.c b/hw/arm/raspi4b.c
+index 6b4f6e5..d0669a8 100644
+--- a/hw/arm/raspi4b.c
++++ b/hw/arm/raspi4b.c
+@@ -63,6 +63,8 @@ static void raspi4_modify_dtb(const struct arm_boot_info *info, void *fdt)
+     uint64_t ram_size = board_ram_size(info->board_id);
+     int offset;
+ 
++    raspi_fixup_board_identity(info, fdt);
++
+     if (info->ram_size > UPPER_RAM_BASE) {
+         raspi_add_memory_node(fdt, UPPER_RAM_BASE, ram_size - UPPER_RAM_BASE);
+     }
+diff --git a/include/hw/arm/raspi_platform.h b/include/hw/arm/raspi_platform.h
+index e3fc843..50f494d 100644
+--- a/include/hw/arm/raspi_platform.h
++++ b/include/hw/arm/raspi_platform.h
+@@ -71,6 +71,7 @@ void raspi_base_machine_init(MachineState *machine,
+ void raspi_machine_class_common_init(MachineClass *mc,
+                                      uint32_t board_rev);
+ uint64_t board_ram_size(uint32_t board_rev);
++void raspi_fixup_board_identity(const struct arm_boot_info *info, void *fdt);
+ 
+ #define MSYNC_OFFSET            0x0000   /* Multicore Sync Block */
+ #define CCPT_OFFSET             0x1000   /* Compact Camera Port 2 TX */
+-- 
+2.47.3
+

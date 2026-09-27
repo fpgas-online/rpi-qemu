@@ -1,0 +1,50 @@
+From 71c5736b628d1c5f78db10eb2e0c6bc7b6e890e8 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 22:08:53 +0930
+Subject: [PATCH] bcm2835_mphi: deassert the interrupt on reset
+
+mphi_reset() cleared the registers but left the IRQ output as it was.
+The interrupt controller keeps the level of its inputs across reset, so
+an MPHI interrupt pending when the machine reset stayed asserted into the
+next boot.  Raspberry Pi's dwc_otg driver uses MPHI to kick its IRQ from
+the FIQ state machine; on raspi0 a reset during USB traffic therefore
+left a stale interrupt that fired as soon as the next kernel's dwc_otg
+enabled it, before the driver was ready:
+
+- booting stock Raspberry Pi OS (kernel 6.18.50+rpt-rpi-v6) with
+  -device usb-net, the third boot (after its second reboot) died with
+  "Unable to handle kernel NULL pointer dereference at virtual address
+  000002e8", "PC is at dwc_otg_handle_common_intr+0x574/0x1848",
+  "Kernel panic - not syncing: Fatal exception in interrupt";
+- reproduced with repeated system_reset during usb-net traffic on the
+  firmware repo's 6.18.52+ kernel: the third boot died the same way
+  ("PC is at dwc_otg_handle_common_intr+0x37c/0x1818"), in
+  dwc_otg_driver_init before its FIQ was set up.
+
+Lower the output in reset.  With this, 13 consecutive resets during
+traffic booted cleanly (the next failure was the unrelated system timer
+issue fixed separately).
+---
+ hw/misc/bcm2835_mphi.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/hw/misc/bcm2835_mphi.c b/hw/misc/bcm2835_mphi.c
+index 55d79e7..181d2fe 100644
+--- a/hw/misc/bcm2835_mphi.c
++++ b/hw/misc/bcm2835_mphi.c
+@@ -133,6 +133,12 @@ static void mphi_reset(DeviceState *dev)
+     s->ctrl = 0;
+     s->intstat = 0;
+     s->swirq = 0;
++    /*
++     * Deassert the output too: the interrupt controller keeps the level of
++     * its inputs across reset, so an IRQ pending at reset time would
++     * otherwise stay asserted into the next boot.
++     */
++    mphi_lower_irq(s);
+ }
+ 
+ static void mphi_realize(DeviceState *dev, Error **errp)
+-- 
+2.47.3
+
