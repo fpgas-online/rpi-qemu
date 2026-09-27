@@ -1,4 +1,4 @@
-From cb17b8010158ae6754cc5b40b2d6935e047036b8 Mon Sep 17 00:00:00 2001
+From 683751ff384bff8193b4c3aab5cbaaf1775d4d74 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1052 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1078 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1231 insertions(+), 25 deletions(-)
+ 5 files changed, 1257 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..965ff3b
+index 0000000..4e3e231
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1052 @@
+@@ -0,0 +1,1078 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -268,6 +268,8 @@ index 0000000..965ff3b
 +            warn_report_err(err);
 +        }
 +    } else {
++        timer_del(g->reset_timer);
++        g->reset_phase = 0;
 +        usb_device_detach(dev);
 +    }
 +}
@@ -640,6 +642,31 @@ index 0000000..965ff3b
 +    usb_packet_complete(dev, p);
 +}
 +
++/* A reset ends every transfer the host has in progress. */
++static void dwc2_gadget_fail_packets(DWC2GadgetState *g)
++{
++    USBDevice *dev = USB_DEVICE(g);
++    int n;
++
++    if (g->ctrl_p) {
++        dwc2_ctrl_complete(g, USB_RET_IOERROR);
++    }
++    for (n = 0; n < DWC2_NB_EP; n++) {
++        USBPacket *in = g->in_p[n], *out = g->out_p[n];
++
++        g->in_p[n] = NULL;
++        g->out_p[n] = NULL;
++        if (in) {
++            in->status = USB_RET_IOERROR;
++            usb_packet_complete(dev, in);
++        }
++        if (out) {
++            out->status = USB_RET_IOERROR;
++            usb_packet_complete(dev, out);
++        }
++    }
++}
++
 +/* Run every transfer the guest's endpoint programming allows. */
 +void dwc2_device_run(DWC2State *s)
 +{
@@ -849,7 +876,9 @@ index 0000000..965ff3b
 +        s->iepreg[n][DEP_TXFSTS] = 0x200;
 +    }
 +    if (g) {
-+        g->ctrl_phase = DWC2_CTRL_IDLE;
++        dwc2_gadget_fail_packets(g);
++        timer_del(g->reset_timer);
++        g->reset_phase = 0;
 +    }
 +    dwc2_session_apply(s, false);
 +}
@@ -895,10 +924,7 @@ index 0000000..965ff3b
 +    if (!s || s->gadget != g) {
 +        return;
 +    }
-+    g->ctrl_p = NULL;
-+    g->ctrl_phase = DWC2_CTRL_IDLE;
-+    memset(g->in_p, 0, sizeof(g->in_p));
-+    memset(g->out_p, 0, sizeof(g->out_p));
++    dwc2_gadget_fail_packets(g);
 +    trace_usb_dwc2_gadget_bus_reset(dev->speed);
 +    if (s->dsts & DSTS_SUSPSTS) {
 +        /* reset signalling on a suspended bus wakes the core */
