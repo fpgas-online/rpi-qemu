@@ -28,6 +28,7 @@ Requirements:
 Usage: uv run run-rpi0-gadget-test.py [scenario ...]
 """
 import os
+import re
 import shutil
 import socket
 import struct
@@ -440,6 +441,9 @@ SCENARIOS = [
 
 GUEST_FAILURES = ("Oops", "WARNING:", "BUG:", "Kernel panic",
                   "Invalid parameter", "insmod", "HANG")
+# the dwc2 driver's complaints about the core (timeouts waiting for a
+# bit the core should have set, failed requests)
+DWC2_COMPLAINT = re.compile(r"dwc2 \S+: .*(timeout|failed|HANG)", re.I)
 
 
 def main():
@@ -459,7 +463,8 @@ def main():
         try:
             fn(g)
             bad = [line.strip() for line in g.output().splitlines()
-                   if any(f in line for f in GUEST_FAILURES)]
+                   if any(f in line for f in GUEST_FAILURES) or
+                   DWC2_COMPLAINT.search(line)]
             expect(not bad, f"guest reported: {bad[:5]}")
             print(f"  PASS  {name} ({time.monotonic() - start:.0f}s)")
         except Exception as e:  # noqa: BLE001 - report every failure
