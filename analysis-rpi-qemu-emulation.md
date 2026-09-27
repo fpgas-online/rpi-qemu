@@ -110,8 +110,8 @@ These devices are **explicitly disabled in the device tree** at boot (`raspi4b.c
 
 | RPi Model | Real Hardware | QEMU Status |
 |---|---|---|
-| RPi 0/1 | No built-in Ethernet; the usual wired option is a USB Ethernet adapter on the OTG/USB port | `-device usb-net,netdev=...` on the DWC2 host port matches that configuration and works end to end on `raspi0` (DHCP, ping; CI: `run-rpi0-boot-test.py`). The Zero W's BCM43438 Wi-Fi is not modelled. |
-| RPi 2B | No built-in Ethernet (via USB hub) | N/A |
+| RPi Zero / Zero W, 1A/1A+ | No built-in Ethernet; the usual wired option is a USB Ethernet adapter on the OTG/USB port | `-device usb-net,netdev=...` on the DWC2 host port matches that configuration and works end to end on `raspi0` (DHCP, ping; CI: `run-rpi0-boot-test.py`). The Zero W's BCM43438 Wi-Fi is not modelled. |
+| RPi 1B/1B+, 2B | USB Ethernet (LAN9512/LAN9514) on the on-board hub | **Not emulated** (`raspi2b` has no model) |
 | RPi 3B/3B+ | USB Ethernet (LAN9514/LAN7515) | **Not emulated** |
 | RPi 4B | GENET + BCM54213PE GbE | **Disabled in DTB, no code** |
 

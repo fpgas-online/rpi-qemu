@@ -103,7 +103,7 @@ qemu-rpi-system-aarch64 -M raspi0 \
   -serial null -serial stdio -display none
 ```
 
-- **Serial ports.** The first `-serial` is the PL011, which a Zero W gives to Bluetooth; the second is the mini UART, which is `serial0` and so the console (`ttyS0`) -- as on the real board with the stock `config.txt`.
+- **Serial ports.** The first `-serial` is the PL011, which a Zero W gives to Bluetooth; the second is the mini UART, which is `serial0` and so the console (`ttyS0`). QEMU behaves as if `enable_uart=1`: on a real Zero W the stock `config.txt` leaves it at 0 (the default when the mini UART is the primary UART), so the board needs `enable_uart=1` for this console.
 - **Firmware behaviour.** With `-kernel` there is no VideoCore firmware, so QEMU does what it would to the DTB and command line: routes GPIO 14/15 to `serial0` (`enable_uart=1`), passes the DTB's own `bootargs` (e.g. `8250.nr_uarts=1`) ahead of `-append`, resolves `console=serial0` to the real tty, and publishes the board revision and serial. The boot reaches `raspberrypi login:` on `ttyS0`.
 - **Wired networking.** A Zero has no on-board Ethernet; like the real board, give it a USB Ethernet adapter on the OTG port: `-netdev user,id=n0 -device usb-net,netdev=n0`. It appears as a `cdc_ether` interface (`usb0`) and gets a DHCP lease from QEMU (`10.0.2.15`, gateway `10.0.2.2`). Leave it off to test a Zero with no network -- also a configuration it boots in.
 - **Board serial.** `-M raspi0,board-serial=0x00000000c0ffee01` sets the serial the guest sees in `/proc/cpuinfo`, `/proc/device-tree/serial-number` and the firmware's `GET_BOARD_SERIAL` (default `0x0000000012345678`).
