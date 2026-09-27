@@ -21,11 +21,12 @@ This project patches QEMU to add Ethernet support to the `raspi4b` machine, maki
 - PXE network boot from a standard TFTP server layout
 - Internet access (ping, HTTPS) via QEMU user-mode networking
 - `config.txt` parsing (`kernel=`, `device_tree=` overrides)
+- **Raspberry Pi Zero / Zero W (`raspi0`):** stock Raspberry Pi OS boots to a serial login, wired networking through a USB Ethernet adapter (`usb-net`), and a settable board serial -- see [below](#raspberry-pi-zero--zero-w-raspi0)
 
 ## Requirements
 
 - **Host:** x86_64 Linux (Debian trixie or compatible)
-- **Pi model:** Raspberry Pi 4B only (`raspi4b` QEMU machine)
+- **Pi model:** Raspberry Pi 4B (`raspi4b`) and Raspberry Pi Zero / Zero W (`raspi0`)
 - **Kernel/DTB/initrd:** from [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot) or your own build
 
 ## Install
@@ -85,6 +86,29 @@ qemu-rpi-system-aarch64 -M raspi4b \
 ```
 
 USB 2.0 devices attach to the DWC2 controller. The guest sees standard `/dev/ttyUSB*` serial ports and `/dev/input/*` HID devices.
+
+### Raspberry Pi Zero / Zero W (`raspi0`)
+
+Boot stock Raspberry Pi OS (armhf) on the `raspi0` machine, with the kernel and device tree from the image's own boot partition:
+
+```bash
+# An overlay keeps the downloaded image pristine and leaves room for
+# Raspberry Pi OS to grow its root filesystem on first boot.
+qemu-img create -f qcow2 -b 2026-09-15-raspios-trixie-armhf-lite.img -F raw zero.qcow2 4G
+
+qemu-rpi-system-aarch64 -M raspi0 \
+  -kernel kernel.img -dtb bcm2708-rpi-zero-w.dtb \
+  -drive file=zero.qcow2,format=qcow2,if=sd \
+  -append "console=serial0,115200 root=/dev/mmcblk0p2 rootfstype=ext4 rootwait" \
+  -serial null -serial stdio -display none
+```
+
+- **Serial ports.** The first `-serial` is the PL011, which a Zero W gives to Bluetooth; the second is the mini UART, which is `serial0` and so the console (`ttyS0`) -- as on the real board with the stock `config.txt`.
+- **Firmware behaviour.** With `-kernel` there is no VideoCore firmware, so QEMU does what it would to the DTB and command line: routes GPIO 14/15 to `serial0` (`enable_uart=1`), passes the DTB's own `bootargs` (e.g. `8250.nr_uarts=1`) ahead of `-append`, resolves `console=serial0` to the real tty, and publishes the board revision and serial. The boot reaches `raspberrypi login:` on `ttyS0`.
+- **Wired networking.** A Zero has no on-board Ethernet; like the real board, give it a USB Ethernet adapter on the OTG port: `-netdev user,id=n0 -device usb-net,netdev=n0`. It appears as a `cdc_ether` interface (`usb0`) and gets a DHCP lease from QEMU (`10.0.2.15`, gateway `10.0.2.2`). Leave it off to test a Zero with no network -- also a configuration it boots in.
+- **Board serial.** `-M raspi0,board-serial=0x00000000c0ffee01` sets the serial the guest sees in `/proc/cpuinfo`, `/proc/device-tree/serial-number` and the firmware's `GET_BOARD_SERIAL` (default `0x0000000012345678`).
+- **Magic SysRq over serial.** The mini UART has no break detection (BCM2835 ARM Peripherals, 2.2), so a BREAK never reaches SysRq on `ttyS0` -- on hardware or here. Use the PL011 as the console, as `dtoverlay=disable-bt` does on a real Zero W: apply the overlay to the DTB (`fdtoverlay -i bcm2708-rpi-zero-w.dtb -o zero-w-disable-bt.dtb overlays/disable-bt.dtbo`), boot with that DTB and swap the ports (`-serial stdio -serial null`); `console=serial0` then lands on `ttyAMA0`, and with `-serial mon:stdio`, Ctrl-A b sends a BREAK.
+- **Not emulated:** the BCM43438 Wi-Fi/Bluetooth, the VideoCore (camera, codecs, `vchiq`) and USB device/gadget mode.
 
 ### PXE Network Boot
 
@@ -147,7 +171,7 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 
 ## Known Limitations
 
-- **Pi 4B only.** Pi 3B/3B+ use USB-attached Ethernet which QEMU doesn't emulate.
+- **Pi 4B and Pi Zero only.** Pi 3B/3B+ use USB-attached Ethernet (LAN9514/LAN7515) which QEMU doesn't emulate. The Pi Zero has no Wi-Fi/Bluetooth model and no USB gadget mode (see above).
 - **No GPU.** `start4.elf` is fetched but not executed. No HDMI, no hardware video decode.
 - **No USB 3.0.** The VL805 xHCI controller (USB 3.0) requires PCIe, which isn't fully emulated. USB 2.0 works via the DWC2 controller.
 - **No bridged/tap networking tested.** User-mode and socket networking work; bridged/tap not tested.
