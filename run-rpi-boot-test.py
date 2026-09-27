@@ -276,9 +276,11 @@ def run_test():
         ("Bulk transfer",       "Bulk transfer: SUCCESS"),
         ("RX csum offload",     "RX csum: CLEAN"),
     ]
-    # Optional checks (reported but don't fail the test)
-    # Ping may fail in CI environments that block ICMP
+    # Optional: USB serial never attaches (QEMU's FTDI usb-serial on a
+    # null chardev needs always-plugged=on) and the kernel has no
+    # ftdi_sio; ping may fail in CI environments that block ICMP
     optional_checks = [
+        ("USB serial",          "ttyUSB0"),
         ("Ping 8.8.8.8",       "bytes from 8.8.8.8"),
     ]
 

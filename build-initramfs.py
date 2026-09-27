@@ -194,7 +194,7 @@ echo "=== dmesg genet ==="
 dmesg 2>&1 | grep -i -e genet -e "Link is" | tail -5
 
 echo "=== dmesg usb ==="
-dmesg 2>&1 | grep -i -e "dwc2" -e "usb 1-" -e "ttyUSB" | tail -10
+dmesg 2>&1 | grep -i -e "dwc2" -e "dwc_otg" -e "usb 1-" -e "ttyUSB" -e "ttyACM" | tail -30
 
 echo "=== Network test complete ==="
 

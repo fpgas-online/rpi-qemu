@@ -783,7 +783,7 @@ def run_test():
 
     # Optional checks (timing-dependent or peer doesn't route internet)
     optional_checks = [
-        ("USB serial",          "ttyUSB"),
+        ("USB serial",          "ttyUSB0"),
         ("Ping gateway",        "bytes from 10.0.2.2"),
         ("Ping 8.8.8.8",       "bytes from 8.8.8.8"),
         ("HTTPS fetch",         "HTTPS fetch: SUCCESS"),
