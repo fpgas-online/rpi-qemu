@@ -337,10 +337,13 @@ def mass_storage(c, ifaces):
 SS_PATTERN = bytes(j % 63 for j in range(4096))     # SourceSink pattern=1
 
 
-def source_sink_iso(c, ifaces, rounds=40):
-    """SourceSink with isochronous endpoints (alternate setting 1): its
-    pattern arrives in the ISO IN packets, and ISO OUT packets carrying it
-    are accepted (the guest's sink checks every byte)."""
+def source_sink_iso(c, ifaces, rounds=20, depth=3):
+    """SourceSink with isochronous endpoints (alternate setting 1), streamed
+    the way a host's audio or video driver does it, with several URBs in
+    flight: after the first two URBs, at least 85% of the IN packets carry
+    the pattern and 85% of the OUT packets are taken (the guest's sink
+    checks every byte), with no packet errors.  (A busy guest may miss an
+    occasional frame, as on hardware.)"""
     alt1 = next(i for i in ifaces if i["cls"] == 0xff and i["alt"] == 1)
     iso = [e for e, t in alt1["types"].items() if t == 1]
     iso_in = next(e & 0x0f for e in iso if e & 0x80)
@@ -348,32 +351,43 @@ def source_sink_iso(c, ifaces, rounds=40):
     expect(c.set_interface(alt1["num"], 1).status == 0,
            "SET_INTERFACE SourceSink 1")
     packets = [u.IsoPacket(k * 1024, 1024) for k in range(8)]
-    got = 0
-    for _ in range(rounds):
-        r = c.wait(c.submit(iso_in, u.DIR_IN, 8 * 1024, iso=packets,
-                            flags=u.URB_ISO_ASAP, interval=8))
+    out = SS_PATTERN[:1024] * 8
+
+    def stream(submit):
+        pending = [submit() for _ in range(depth)]
+        done = []
+        while len(done) < rounds:
+            done.append(c.wait(pending.pop(0)))
+            pending.append(submit())
+        for seq in pending:
+            c.wait(seq)
+        return done
+
+    urbs = stream(lambda: c.submit(iso_in, u.DIR_IN, 8 * 1024, iso=packets,
+                                   flags=u.URB_ISO_ASAP, interval=8))
+    full = 0
+    for n, r in enumerate(urbs):
+        expect(r.status == 0 and r.error_count == 0,
+               f"ISO IN URB {n}: status {r.status}, errors {r.error_count}")
         off = 0
         for pk in r.iso:
             data = r.data[off:off + pk.actual_length]
             off += pk.actual_length
-            if pk.actual_length:
-                expect(data == SS_PATTERN[:len(data)],
-                       f"ISO IN packet {data[:16].hex()}...")
-                got += 1
-        if got >= 32:
-            break
-    expect(got >= 32, f"only {got} ISO IN packets with data in {rounds} URBs")
-    sent = 0
-    out = SS_PATTERN[:1024] * 8
-    for _ in range(rounds):
-        r = c.wait(c.submit(iso_out, u.DIR_OUT, len(out), out, iso=packets,
-                            flags=u.URB_ISO_ASAP, interval=8))
-        sent += sum(1 for pk in r.iso
-                    if pk.status == 0 and pk.actual_length == 1024)
-        if sent >= 32:
-            break
-    expect(sent >= 32, f"only {sent} ISO OUT packets accepted in {rounds} URBs")
-    return got, sent
+            expect(data == SS_PATTERN[:len(data)],
+                   f"ISO IN URB {n} packet {data[:16].hex()}...")
+            full += n >= 2 and pk.actual_length == 1024
+    total = (rounds - 2) * len(packets)
+    expect(full >= 0.85 * total, f"ISO IN: {full} of {total} packets carried data")
+    urbs = stream(lambda: c.submit(iso_out, u.DIR_OUT, len(out), out,
+                                   iso=packets, flags=u.URB_ISO_ASAP,
+                                   interval=8))
+    taken = 0
+    for n, r in enumerate(urbs):
+        expect(r.status == 0 and r.error_count == 0,
+               f"ISO OUT URB {n}: status {r.status}, errors {r.error_count}")
+        taken += n >= 2 and sum(pk.actual_length == 1024 for pk in r.iso)
+    expect(taken >= 0.85 * total, f"ISO OUT: {taken} of {total} packets taken")
+    return full, taken
 
 
 # Scenarios
