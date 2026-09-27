@@ -1,4 +1,4 @@
-From 097bf0d508074a88d849caa69b1efda0dc10e951 Mon Sep 17 00:00:00 2001
+From d3046e1221a3cd92e5fd2c50860e18ffa16473b2 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 00:24:03 +0930
 Subject: [PATCH] hw/usb: add a USB/IP server device
@@ -30,9 +30,17 @@ the sysbus tree).  The transport is a chardev, as for usbredir.
 - CMD_UNLINK cancels: -ECONNRESET if the URB was pending (no RET_SUBMIT
   follows), 0 if it had completed.  Status values are Linux errno
   numbers on every host.
-- One client at a time.  A malformed message closes that connection
-  only; device unplug and machine reset close it too, which is how a
-  USB/IP exporter reports a removed device (as Linux's usbip-host does).
+- An ISO URB for an endpoint that is not isochronous stalls packet by
+  packet (the device is never asked to hold an ISO packet).  Unlinking
+  the URB the device holds hands the URBs queued behind it to the device
+  again: QEMU's core only starts a queued packet when its predecessor
+  completes.
+- One client at a time, holding at most 1024 URBs / 64 MiB; reading
+  pauses while the server enumerates or its output backs up.  A
+  malformed message (including a control URB whose direction disagrees
+  with its SETUP) closes that connection only; device unplug and machine
+  reset close it too, which is how a USB/IP exporter reports a removed
+  device (as Linux's usbip-host does).
 
 USBBus gains no_auto_hub: usb_claim_port() chains a usb-hub onto a bus
 when a device takes its last free port, which on a one-port bus would
@@ -54,10 +62,10 @@ Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
  hw/usb/bus.c                  |    3 +-
  hw/usb/meson.build            |    1 +
  hw/usb/trace-events           |    8 +
- hw/usb/usbip-server.c         | 1116 +++++++++++++++++++++++++++++++++
+ hw/usb/usbip-server.c         | 1141 +++++++++++++++++++++++++++++++++
  include/hw/usb/usb.h          |    2 +
  include/hw/usb/usbip-server.h |   14 +
- 9 files changed, 1153 insertions(+), 1 deletion(-)
+ 9 files changed, 1178 insertions(+), 1 deletion(-)
  create mode 100644 hw/usb/usbip-server.c
  create mode 100644 include/hw/usb/usbip-server.h
 
@@ -159,10 +167,10 @@ index 0d4318d..1de3a6a 100644
 +usbip_server_enumerate(int step, int status) "step=%d status=%d"
 diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
 new file mode 100644
-index 0000000..f48149a
+index 0000000..a50acf8
 --- /dev/null
 +++ b/hw/usb/usbip-server.c
-@@ -0,0 +1,1116 @@
+@@ -0,0 +1,1141 @@
 +/*
 + * USB/IP server: exports the QEMU USB device on its port over USB/IP
 + *
@@ -215,6 +223,10 @@ index 0000000..f48149a
 +#define USBIP_ISO_DESC_LEN      16
 +#define USBIP_MAX_XFER          (16 * MiB)
 +#define USBIP_MAX_ISO_PACKETS   1024
++
++#define USBIP_MAX_URBS          1024        /* per client */
++#define USBIP_MAX_URB_BYTES     (64 * MiB)  /* per client */
++#define USBIP_TX_HIGH_WATER     (1 * MiB)   /* stop reading above */
 +
 +#define USBIP_URB_SHORT_NOT_OK  0x0001
 +
@@ -288,6 +300,8 @@ index 0000000..f48149a
 +    QEMUTimer *retry_timer;
 +    QEMUBH *retry_bh;
 +    bool port_resetting;
++    unsigned nurbs;             /* client URBs held */
++    size_t urb_bytes;           /* and their buffers */
 +
 +    /* Self-enumeration: vhci-hcd never sends SET_ADDRESS or a reset. */
 +    uint16_t enum_op;           /* the OP_REQ_* waiting for it, or 0 */
@@ -331,6 +345,8 @@ index 0000000..f48149a
 +        }
 +        g_byte_array_remove_range(s->tx, 0, r);
 +    }
++    /* drained: read again (usbip_can_read) */
++    qemu_chr_fe_accept_input(&s->chr);
 +}
 +
 +static void usbip_send(USBIPServerState *s, const void *data, size_t len)
@@ -366,8 +382,12 @@ index 0000000..f48149a
 +    return u;
 +}
 +
-+static void usbip_urb_free(USBIPURB *u)
++static void usbip_urb_free(USBIPServerState *s, USBIPURB *u)
 +{
++    if (!u->internal) {
++        s->nurbs--;
++        s->urb_bytes -= u->len;
++    }
 +    usb_packet_cleanup(&u->packet);
 +    g_free(u->iso);
 +    g_free(u->buf);
@@ -462,7 +482,7 @@ index 0000000..f48149a
 +        return;
 +    }
 +    usbip_send_ret_submit(s, u);
-+    usbip_urb_free(u);
++    usbip_urb_free(s, u);
 +}
 +
 +static void usbip_arm_retry(USBIPServerState *s)
@@ -617,12 +637,12 @@ index 0000000..f48149a
 +
 +    while ((u = QTAILQ_FIRST(&s->inflight))) {
 +        usbip_urb_unlink(s, u);
-+        usbip_urb_free(u);
++        usbip_urb_free(s, u);
 +    }
 +    for (i = 0; i < USBIP_NUM_KEYS; i++) {
 +        while ((u = QTAILQ_FIRST(&s->waiting[i]))) {
 +            usbip_urb_unlink(s, u);
-+            usbip_urb_free(u);
++            usbip_urb_free(s, u);
 +        }
 +    }
 +}
@@ -832,6 +852,7 @@ index 0000000..f48149a
 +        usbip_reply_import(s, ok);
 +    }
 +    usbip_parse(s);             /* anything the client sent meanwhile */
++    qemu_chr_fe_accept_input(&s->chr);
 +}
 +
 +static void usbip_enum_done(USBIPServerState *s, USBIPURB *u)
@@ -862,7 +883,7 @@ index 0000000..f48149a
 +        }
 +        break;
 +    }
-+    usbip_urb_free(u);
++    usbip_urb_free(s, u);
 +
 +    if (!ok) {
 +        usbip_enum_finish(s, false);
@@ -929,7 +950,14 @@ index 0000000..f48149a
 +        usbip_drop_client(s, "control URB direction disagrees with its SETUP");
 +        return;
 +    }
++    if (s->nurbs >= USBIP_MAX_URBS ||
++        s->urb_bytes + ldl_be_p(d + 0x18) > USBIP_MAX_URB_BYTES) {
++        usbip_drop_client(s, "too many URBs outstanding");
++        return;
++    }
 +    u = usbip_urb_new(ldl_be_p(d + 0x04), ldl_be_p(d + 0x18));
++    s->nurbs++;
++    s->urb_bytes += u->len;
 +
 +    u->in = in;
 +    u->epnum = ldl_be_p(d + 0x10);
@@ -948,7 +976,7 @@ index 0000000..f48149a
 +            u->iso[i].length = ldl_be_p(desc + 4);
 +            if (u->iso[i].offset > u->len ||
 +                u->iso[i].length > u->len - u->iso[i].offset) {
-+                usbip_urb_free(u);
++                usbip_urb_free(s, u);
 +                usbip_drop_client(s, "ISO packet outside its transfer buffer");
 +                return;
 +            }
@@ -992,7 +1020,7 @@ index 0000000..f48149a
 +
 +    if (u) {
 +        usbip_urb_unlink(s, u);
-+        usbip_urb_free(u);
++        usbip_urb_free(s, u);
 +        status = -USBIP_ECONNRESET;
 +    }
 +    trace_usbip_server_unlink(seqnum, victim, status);
@@ -1097,7 +1125,12 @@ index 0000000..f48149a
 +{
 +    USBIPServerState *s = opaque;
 +
-+    return s->conn == USBIP_CONN_NONE ? 0 : 64 * KiB;
++    /* back-pressure: not while enumerating, nor while output backs up */
++    if (s->conn == USBIP_CONN_NONE || s->conn == USBIP_CONN_ENUMERATING ||
++        s->tx->len > USBIP_TX_HIGH_WATER) {
++        return 0;
++    }
++    return 64 * KiB;
 +}
 +
 +static void usbip_read(void *opaque, const uint8_t *buf, int size)
