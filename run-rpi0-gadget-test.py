@@ -146,6 +146,7 @@ def parse_config(raw):
             ifaces.append(cur)
         elif dtype == 5 and cur is not None:
             cur["eps"].append(raw[i + 2])
+            cur.setdefault("types", {})[raw[i + 2]] = raw[i + 3] & 3
         i += length
     return ifaces
 
@@ -333,6 +334,48 @@ def mass_storage(c, ifaces):
     expect(bot.read10(100, 1) == block, "read-back of LBA 100")
 
 
+SS_PATTERN = bytes(j % 63 for j in range(4096))     # SourceSink pattern=1
+
+
+def source_sink_iso(c, ifaces, rounds=40):
+    """SourceSink with isochronous endpoints (alternate setting 1): its
+    pattern arrives in the ISO IN packets, and ISO OUT packets carrying it
+    are accepted (the guest's sink checks every byte)."""
+    alt1 = next(i for i in ifaces if i["cls"] == 0xff and i["alt"] == 1)
+    iso = [e for e, t in alt1["types"].items() if t == 1]
+    iso_in = next(e & 0x0f for e in iso if e & 0x80)
+    iso_out = next(e for e in iso if not e & 0x80)
+    expect(c.set_interface(alt1["num"], 1).status == 0,
+           "SET_INTERFACE SourceSink 1")
+    packets = [u.IsoPacket(k * 1024, 1024) for k in range(8)]
+    got = 0
+    for _ in range(rounds):
+        r = c.wait(c.submit(iso_in, u.DIR_IN, 8 * 1024, iso=packets,
+                            flags=u.URB_ISO_ASAP, interval=8))
+        off = 0
+        for pk in r.iso:
+            data = r.data[off:off + pk.actual_length]
+            off += pk.actual_length
+            if pk.actual_length:
+                expect(data == SS_PATTERN[:len(data)],
+                       f"ISO IN packet {data[:16].hex()}...")
+                got += 1
+        if got >= 32:
+            break
+    expect(got >= 32, f"only {got} ISO IN packets with data in {rounds} URBs")
+    sent = 0
+    out = SS_PATTERN[:1024] * 8
+    for _ in range(rounds):
+        r = c.wait(c.submit(iso_out, u.DIR_OUT, len(out), out, iso=packets,
+                            flags=u.URB_ISO_ASAP, interval=8))
+        sent += sum(1 for pk in r.iso
+                    if pk.status == 0 and pk.actual_length == 1024)
+        if sent >= 32:
+            break
+    expect(sent >= 32, f"only {sent} ISO OUT packets accepted in {rounds} URBs")
+    return got, sent
+
+
 # Scenarios
 
 def scenario(funcs):
@@ -429,6 +472,15 @@ def composite(g):
            "guest's image does not hold the host's write")
 
 
+@scenario("sslb")
+def isochronous(g):
+    expect(g.wait_for("GADGET: READY", 240), "gadget never became ready")
+    c, _, ifaces = attach(g)
+    source_sink_iso(c, ifaces)
+    c.close()
+    g.finish()
+
+
 SCENARIOS = [
     ("No host: boots, gadget unattached", no_host),
     ("Host at boot: enumerates, ACM shell", host_at_boot),
@@ -437,10 +489,11 @@ SCENARIOS = [
     ("CDC-NCM: ARP + ping with usb0 (NTB framing)", ncm),
     ("Mass storage: read, write, guest sees the write", mass_storage_rw),
     ("Composite ACM + ECM + mass storage", composite),
+    ("Isochronous IN and OUT (SourceSink pattern)", isochronous),
 ]
 
 GUEST_FAILURES = ("Oops", "WARNING:", "BUG:", "Kernel panic",
-                  "Invalid parameter", "insmod", "HANG")
+                  "Invalid parameter", "insmod", "HANG", "bad OUT byte")
 # the dwc2 driver's complaints about the core (timeouts waiting for a
 # bit the core should have set, failed requests)
 DWC2_COMPLAINT = re.compile(r"dwc2 \S+: .*(timeout|failed|HANG)", re.I)
