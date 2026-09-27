@@ -1,4 +1,4 @@
-From 69280a1680f1ce9253a2baf95e52e6dfa038a4c5 Mon Sep 17 00:00:00 2001
+From 296ffd5700b49684db7e3e758ef257a1d075af0d Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1104 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1108 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1283 insertions(+), 25 deletions(-)
+ 5 files changed, 1287 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..b1d3873
+index 0000000..db935db
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1104 @@
+@@ -0,0 +1,1108 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -390,11 +390,15 @@ index 0000000..b1d3873
 +    uint32_t *ep = dwc2_ep(s, n, true);
 +    uint32_t mps = dwc2_ep_mps(s, n, true);
 +    uint32_t xfer, pkt, moved = 0;
++    uint32_t type = ep[DEP_CTL] & DXEPCTL_EPTYPE_MASK;
++    bool periodic = n > 0 && (type == DXEPCTL_EPTYPE_ISO ||
++                              type == DXEPCTL_EPTYPE_INTERRUPT);
 +
 +    *host_done = false;
 +    *babble = false;
++    /* the global IN NAK applies to the non-periodic endpoints */
 +    if (!(ep[DEP_CTL] & DXEPCTL_EPENA) || (ep[DEP_CTL] & DXEPCTL_NAKSTS) ||
-+        (n > 0 && (s->dctl & DCTL_GNPINNAKSTS))) {
++        (!periodic && (s->dctl & DCTL_GNPINNAKSTS))) {
 +        return 0;
 +    }
 +    dwc2_tsiz_get(s, n, true, &xfer, &pkt);
