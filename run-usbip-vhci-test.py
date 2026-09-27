@@ -51,6 +51,69 @@ def find_disk(timeout):
     return None
 
 
+def diagnostics():
+    """What the host kernel made of the imported device."""
+    print("--- vhci status ---")
+    print((VHCI / "status").read_text())
+    print("--- USB devices ---")
+    for dev in sorted(Path("/sys/bus/usb/devices").iterdir()):
+        ids = [(dev / f).read_text().strip() for f in ("idVendor", "idProduct")
+               if (dev / f).exists()]
+        drv = dev / "driver"
+        print(f"  {dev.name} {':'.join(ids)} driver="
+              f"{drv.resolve().name if drv.exists() else '-'}")
+    print("--- dmesg (tail) ---")
+    print(subprocess.run(["dmesg"], capture_output=True, text=True).stdout[-6000:])
+
+
+def run(tool):
+    img = rt.storage_image()
+    trace = ["-trace", "enable=usbip_server*"]
+    with rt.QemuUsbip(rt.storage_args(img) + trace) as q:
+        if tool == "usbip":
+            out = subprocess.run(["usbip", "--tcp-port", str(q.port), "list",
+                                  "-r", "127.0.0.1"],
+                                 capture_output=True, text=True, check=True).stdout
+            print(out)
+            if "46f4:0001" not in out:
+                print("FAIL: usbip list does not show the device")
+                return False
+            subprocess.run(["usbip", "--tcp-port", str(q.port), "attach",
+                            "-r", "127.0.0.1", "-b", "1-1"], check=True)
+            port = None
+        else:
+            c = q.client()
+            rec = c.import_device("1-1")
+            port = free_hs_port()
+            (VHCI / "attach").write_text(
+                f"{port} {c.sock.fileno()} {rec.devid} {rec.speed}")
+            c.close()                   # the kernel holds its own reference
+        disk = find_disk(30)
+        if disk is None:
+            print("FAIL: no QEMU disk appeared behind vhci_hcd")
+            diagnostics()
+            return False
+        with open(disk, "rb") as f:
+            first = f.read(4096)
+        ok = all(first[i * 512:i * 512 + 4] == i.to_bytes(4, "little")
+                 for i in range(8))
+        print(f"  {'PASS' if ok else 'FAIL'}  kernel usb-storage reads the image"
+              f" via {disk}")
+        if port is None:
+            status = (VHCI / "status").read_text().splitlines()
+            port = next(int(line.split()[1]) for line in status[1:]
+                        if line.split()[2] == "006")
+        (VHCI / "detach").write_text(str(port))
+        time.sleep(1)
+        gone = find_disk(0.1) is None
+        print(f"  {'PASS' if gone else 'FAIL'}  disk removed after detach")
+        alive = q.alive()
+        print(f"  {'PASS' if alive else 'FAIL'}  QEMU still running")
+        if not (ok and gone and alive):
+            diagnostics()
+        return ok and gone and alive
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tool", choices=["sysfs", "usbip"], default="sysfs")
@@ -58,43 +121,10 @@ def main():
     if os.geteuid() != 0 or not VHCI.exists():
         print("needs root and the vhci-hcd module (modprobe vhci-hcd)")
         return 1
-    img = rt.storage_image()
-    with rt.QemuUsbip(rt.storage_args(img)) as q:
-        if args.tool == "usbip":
-            out = subprocess.run(["usbip", "--tcp-port", str(q.port), "list", "-r", "127.0.0.1"],
-                                 capture_output=True, text=True, check=True).stdout
-            print(out)
-            if "46f4:0001" not in out:
-                print("FAIL: usbip list does not show the device")
-                return 1
-            subprocess.run(["usbip", "--tcp-port", str(q.port), "attach", "-r", "127.0.0.1", "-b", "1-1"],
-                           check=True)
-            port = None
-        else:
-            c = q.client()
-            rec = c.import_device("1-1")
-            port = free_hs_port()
-            (VHCI / "attach").write_text(f"{port} {c.sock.fileno()} {rec.devid} {rec.speed}")
-            c.close()                   # the kernel holds its own reference
-        disk = find_disk(30)
-        if disk is None:
-            print("FAIL: no QEMU disk appeared behind vhci_hcd")
-            return 1
-        with open(disk, "rb") as f:
-            first = f.read(4096)
-        ok = all(first[i * 512:i * 512 + 4] == i.to_bytes(4, "little") for i in range(8))
-        print(f"  {'PASS' if ok else 'FAIL'}  kernel usb-storage reads the image via {disk}")
-        if port is None:
-            status = (VHCI / "status").read_text().splitlines()
-            port = next(int(l.split()[1]) for l in status[1:] if l.split()[2] == "006")
-        (VHCI / "detach").write_text(str(port))
-        time.sleep(1)
-        gone = find_disk(0.1) is None
-        print(f"  {'PASS' if gone else 'FAIL'}  disk removed after detach")
-        alive = q.alive()
-        print(f"  {'PASS' if alive else 'FAIL'}  QEMU still running")
-    shutil.rmtree(rt.WORK, ignore_errors=True)      # root-owned files
-    return 0 if ok and gone and alive else 1
+    try:
+        return 0 if run(args.tool) else 1
+    finally:
+        shutil.rmtree(rt.WORK, ignore_errors=True)      # root-owned files
 
 
 if __name__ == "__main__":
