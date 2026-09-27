@@ -25,10 +25,15 @@ jobs:
     timeout-minutes: 45
     # Called runs only exist once the build jobs they need have succeeded;
     # workflow_run fires on any build conclusion, so check it succeeded.
+    # workflow_run only for successful builds of pushes to main: the build
+    # also runs for pull requests, and a fork PR's branch may be named
+    # "main", but this job checks out the built commit and runs its code
+    # with the base repository's caches.
     if: >-
       inputs.qemu-source == 'artifact' ||
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
     env:
       QEMU_SOURCE: ${{ inputs.qemu-source || 'apt' }}
 
@@ -36,10 +41,16 @@ jobs:
       - name: Install base tools
         run: |
           apt-get update
-          apt-get install -y git ca-certificates curl
+          apt-get install -y git ca-certificates curl python3
 
+      # On workflow_run, test the commit that was built and published (not
+      # whatever main is by now), with full history so ci/gen-changelog.py
+      # can work out the exact package version it produced.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+          fetch-depth: 0
 
       - name: Download QEMU packages built by this run
         if: env.QEMU_SOURCE == 'artifact'
@@ -72,8 +83,30 @@ jobs:
             > /etc/apt/sources.list.d/rpi-qemu.list
           apt-get update
 
-          echo "=== Installing qemu-rpi-system-arm ==="
-          apt-get install -y qemu-rpi-system-arm
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            # The Pages deployment can lag the build that published it, so
+            # wait until the repo serves exactly that build's version
+            # instead of installing whatever is there (rpi-qemu#10).
+            VERSION=$(python3 ci/gen-changelog.py --deb-version)
+            echo "=== Waiting for qemu-rpi-system-arm $VERSION ==="
+            for attempt in $(seq 1 30); do
+              # madison pads the version column; compare the trimmed field
+              if apt-cache madison qemu-rpi-system-arm |
+                 awk -F'|' -v v="$VERSION" '{gsub(/ /, "", $2)} $2 == v {f = 1} END {exit !f}'; then
+                break
+              fi
+              echo "attempt $attempt: $VERSION not served yet"
+              sleep 20
+              # A failed update is retried; the pinned install below fails
+              # loudly if the version never appears.
+              apt-get update || echo "apt-get update failed; retrying"
+            done
+            apt-get install -y "qemu-rpi-system-arm=$VERSION" \
+              "qemu-rpi-system-data=$VERSION"
+          else
+            echo "=== Installing qemu-rpi-system-arm ==="
+            apt-get install -y qemu-rpi-system-arm
+          fi
 
           echo "=== Installed ==="
           which qemu-rpi-system-aarch64
