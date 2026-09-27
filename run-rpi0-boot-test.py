@@ -10,6 +10,8 @@ console=serial0,115200, i.e. the console on the mini UART.
 Regression checks for:
   - rpi-qemu#27: bcm2835-power probing the ASB bridge without an external
     abort (the abort killed the deferred-probe worker, so nothing booted);
+  - rpi-qemu#25: the board identity (-M raspi0,board-serial=...) reaching
+    /proc/cpuinfo and /proc/device-tree/serial-number;
   - rpi-qemu#28: the mini UART registering ttyS0 and carrying the console,
     which needs QEMU to do the firmware's DT/cmdline fixups (GPIO 14/15
     pins for serial0, the DTB's own bootargs -- with 8250.nr_uarts=1 --
@@ -53,6 +55,8 @@ INITRD = BASE / "test-images" / "test-initramfs-rpi0.cpio.gz"
 # firmware does.  earlycon shows the boot before ttyS0 exists.
 BOOTARGS = "console=serial0,115200 earlycon rdinit=/init"
 RX_LINE = "ping-from-host"
+# Pinned board serial (rpi-qemu#25): the guest must see exactly this.
+BOARD_SERIAL = "00000000c0ffee01"
 
 
 def check_prerequisites():
@@ -77,7 +81,7 @@ def run_test():
     print("=" * 70)
 
     proc = subprocess.Popen(
-        [str(QEMU), "-M", "raspi0",
+        [str(QEMU), "-M", f"raspi0,board-serial=0x{BOARD_SERIAL}",
          "-kernel", str(KERNEL), "-dtb", str(DTB), "-initrd", str(INITRD),
          "-append", BOOTARGS,
          "-serial", "null",      # PL011 (Bluetooth UART on a Zero W)
@@ -145,6 +149,9 @@ def run_test():
         ("Console on ttyS0",       "console [ttyS0] enabled"),
         ("Userspace console",      "Console: ttyS0"),
         ("RX over mini UART",      f"RX test: got [{RX_LINE}]"),
+        ("cpuinfo Revision (#25)", "Revision: 920092"),
+        ("cpuinfo Serial (#25)",   f"Serial: {BOARD_SERIAL}"),
+        ("DT serial-number (#25)", f"DT serial-number: {BOARD_SERIAL}"),
         ("Test complete",          "=== raspi0 test complete ==="),
     ]
     negative_checks = [
@@ -176,7 +183,8 @@ def run_test():
         s = line.strip()
         for kw in ["Linux version", "Kernel command line", "power domains",
                    "external abort", "PC is at", "ttyS0", "Cmdline:",
-                   "Console:", "RX test:", "raspi0 test complete"]:
+                   "Console:", "RX test:", "Revision:", "Serial:",
+                   "serial-number:", "raspi0 test complete"]:
             if kw in s:
                 print(f"  > {s[:150]}")
                 break

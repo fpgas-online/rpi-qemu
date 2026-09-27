@@ -222,6 +222,11 @@ else
     echo "ttyS0: MISSING"
 fi
 
+# Board identity the firmware publishes in the DT (rpi-qemu#25).
+echo "Revision: $(sed -n 's/^Revision[[:space:]]*: //p' /proc/cpuinfo)"
+echo "Serial: $(sed -n 's/^Serial[[:space:]]*: //p' /proc/cpuinfo)"
+echo "DT serial-number: $(tr -d '\\000' < /proc/device-tree/serial-number 2>&1)"
+
 # Receive over the console UART: the harness answers READY with a line.
 echo "RX test: READY"
 line=""
