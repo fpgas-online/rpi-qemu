@@ -50,7 +50,7 @@ QEMU emulates 6 Raspberry Pi boards across 4 SoC generations:
 | **Frame Buffer** | `hw/display/bcm2835_fb.c` | Virtual/physical resolution |
 | **SD Host** | `hw/sd/bcm2835_sdhost.c` | FIFO-based, no DMA |
 | **SDHCI (EMMC1/EMMC2)** | Generic SDHCI | SD spec v2/v3 |
-| **DWC2 USB** | `hw/usb/hcd-dwc2.c` | Host-mode only (see 2.2) |
+| **DWC2 USB** | `hw/usb/hcd-dwc2.c`, `hw/usb/dwc2-gadget.c` | Host and device (gadget) mode (see 2.2) |
 | **I2C** (3 controllers) | `hw/i2c/bcm2835_i2c.c` | BSC0/BSC1/BSC2 |
 | **SPI** | `hw/ssi/bcm2835_spi.c` | SPI0 master, no DMA/LoSSI |
 | **Clock Manager (CPRMAN)** | `hw/misc/bcm2835_cprman.c` | Full clock tree |
@@ -61,7 +61,7 @@ QEMU emulates 6 Raspberry Pi boards across 4 SoC generations:
 
 | Peripheral | Status | Gap |
 |---|---|---|
-| **DWC2 USB** | Host-only | No device/OTG mode, no slave mode FIFOs. `TODO` at `hcd-dwc2.c:738` |
+| **DWC2 USB** | Host and device mode (buffer DMA) | Device mode and the `dwc2-gadget` device, exported with `usbip-server` (rpi-qemu#22); no slave-mode (PIO) FIFOs, which the Raspberry Pi drivers do not use |
 | **AUX (Mini UART)** | Core UART only | No line/modem control, baudrate, SPI1/SPI2 |
 | **SPI** | Transfer-active only | DMA and LoSSI modes unimplemented |
 | **Thermal** | Stub | Hardcoded 25C. `hw/misc/bcm2835_thermal.c` |
@@ -411,7 +411,7 @@ The Cadence GEM (`hw/net/cadence_gem.c`) is the closest architectural match:
 2. **PCIe Root Port** -- Blocks XHCI USB3 and potentially other PCIe devices on RPi4. Also in unmerged v6 series.
 3. **USB Network for RPi3** -- Could be a simpler win by auto-attaching a USB-net device in machine init.
 4. **RNG200** -- Modern RNG for RPi4 (the legacy BCM2835 RNG still works).
-5. **DWC2 Device/OTG Mode** -- Only host mode works; gadget mode would be useful.
+5. **DWC2 Device/OTG Mode** -- Done (rpi-qemu#22): the stock kernel's gadget stack runs on raspi0 and is exported over USB/IP.
 
 ### Recommended Approach
 
