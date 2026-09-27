@@ -267,7 +267,8 @@ RPI0_GADGET_INIT_SCRIPT = """\
 # Init for the raspi0 USB gadget test (rpi-qemu#22): the stock dwc2 driver
 # in peripheral mode with a configfs gadget, exported to the harness over
 # USB/IP.  gadget=<f>[,<f>...] on the command line picks the functions:
-# acm, ecm, ncm, ms (mass storage).
+# acm, ecm, ncm, ms (mass storage), sslb (SourceSink: bulk and isochronous
+# endpoints streaming a known pattern).
 mount -t proc proc /proc
 mount -t sysfs sys /sys
 mount -t devtmpfs devtmpfs /dev
@@ -279,7 +280,7 @@ FUNCS=$(sed -n 's/.*gadget=\\([a-z,]*\\).*/\\1/p' /proc/cmdline | tr , ' ')
 echo "Functions: $FUNCS"
 
 for m in roles dwc2 libcomposite u_serial usb_f_acm u_ether usb_f_ecm \\
-         usb_f_ncm usb_f_mass_storage; do
+         usb_f_ncm usb_f_mass_storage usb_f_ss_lb; do
     insmod /lib/modules/$m.ko || echo "insmod $m: FAILED"
 done
 
@@ -323,6 +324,13 @@ for f in $FUNCS; do
         mkdir $G/functions/mass_storage.usb0
         echo /ms.img > $G/functions/mass_storage.usb0/lun.0/file
         ln -s $G/functions/mass_storage.usb0 $G/configs/c.1/ ;;
+    sslb)
+        F=$G/functions/SourceSink.usb0
+        mkdir $F
+        echo 1 > $F/pattern             # byte i of a buffer is i % 63
+        echo 4 > $F/isoc_interval       # 2^(4-1) microframes: 1 ms
+        echo 1024 > $F/isoc_maxpacket
+        ln -s $F $G/configs/c.1/ ;;
     esac
 done
 echo "$UDC" > $G/UDC && echo "GADGET: bound [$FUNCS]"
@@ -362,6 +370,8 @@ if [ -d /sys/class/net/usb0 ]; then
          "tx_packets=$(cat /sys/class/net/usb0/statistics/tx_packets)"
 fi
 dmesg | grep -i -e "dwc2" -e "gadget" -e "WARNING" -e "Oops" | tail -20
+# SourceSink checks the pattern of what it receives
+dmesg | grep -i -e "bad OUT byte" -e "source_sink" -e "sourcesink" | tail -10
 echo "=== raspi0 gadget test complete ==="
 poweroff -f 2>&1 || exec /bin/sh
 """
@@ -385,7 +395,8 @@ TARGETS = {
                         module_dir="rpi0",
                         modules=["roles", "dwc2", "libcomposite", "u_serial",
                                  "usb_f_acm", "u_ether", "usb_f_ecm",
-                                 "usb_f_ncm", "usb_f_mass_storage"]),
+                                 "usb_f_ncm", "usb_f_mass_storage",
+                                 "usb_f_ss_lb"]),
 }
 
 
