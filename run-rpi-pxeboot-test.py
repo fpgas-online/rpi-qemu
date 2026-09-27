@@ -225,8 +225,11 @@ def run_test():
         ("cmdline.txt comment discarded",
                                 "and this comment line must not reach"),
     ]
-    # Optional
+    # Optional: USB serial never attaches (QEMU's FTDI usb-serial on a
+    # null chardev needs always-plugged=on) and the kernel has no
+    # ftdi_sio
     optional_checks = [
+        ("USB serial",          "ttyUSB0"),
         ("Ping 8.8.8.8",       "bytes from 8.8.8.8"),
     ]
 
