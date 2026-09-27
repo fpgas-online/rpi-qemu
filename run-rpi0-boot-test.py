@@ -197,6 +197,11 @@ def run_test():
         ("RX over mini UART",      f"RX test: got [{RX_LINE}]"),
         ("dwc_otg FIQ FSM enabled", "FIQ FSM acceleration enabled"),
         ("usb-net NIC bound (#24)", "USB NIC: usb0 driver=cdc_ether"),
+        # dwc_otg prints the core's GSNPSID and its TX FIFO architecture
+        # (GHWCFG4.DED_FIFO_EN) while probing: the BCM2835's core is 2.80a
+        # with dedicated TX FIFOs (#22).
+        ("DWC2 core identity is the BCM2835's (#22)", "Core Release: 2.80a"),
+        ("DWC2 has dedicated TX FIFOs (#22)", "Dedicated Tx FIFOs mode"),
         ("DHCP over usb-net (#24)", "lease of 10.0.2.15 obtained from 10.0.2.2"),
         ("Ping over usb-net (#24)", "3 packets transmitted, 3 packets received"),
         ("cpuinfo Revision (#25)", "Revision: 920092"),

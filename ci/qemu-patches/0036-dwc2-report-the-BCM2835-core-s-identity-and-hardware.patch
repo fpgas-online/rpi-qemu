@@ -1,0 +1,79 @@
+From 8a03d90be3a668a1b7e1be9ad9cf545896de8cbd Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 28 Sep 2026 00:14:22 +0930
+Subject: [PATCH] dwc2: report the BCM2835 core's identity and hardware
+ configuration
+
+The model reported a 2.94a core (GSNPSID 0x4f54294a), GUID 0 and
+synthetic GHWCFG values with no device endpoints and shared TX FIFOs.
+Report what the BCM2835's core reads on silicon, from a read-only
+/dev/mem dump of a Raspberry Pi Zero W (revision 9000c1, stock
+6.18.50+rpt-rpi-v6, where the dwc2 driver logs "EPs: 8, dedicated
+fifos, 4080 entries in SPRAM"); TinyUSB's dwc2_info.py lists the same
+values for the BCM2711:
+
+  GUID     0x2708a000
+  GSNPSID  0x4f54280a  core 2.80a
+  GHWCFG1  0x00000000
+  GHWCFG2  0x228ddd50  internal DMA, 7 device EPs + EP0, 8 host channels
+  GHWCFG3  0x0ff000e8  4080-word FIFO RAM
+  GHWCFG4  0x1ff00020  dedicated TX FIFOs, no descriptor DMA
+
+The host model keeps what it relies on: GHWCFG2.NUM_HOST_CHAN (bits
+17:14) = (0x228ddd50 >> 14) & 0xf = 7, i.e. 8 channels = DWC2_NB_CHAN;
+ARCHITECTURE (bits 4:3) = 2, internal DMA; DYNAMIC_FIFO (bit 19) set.
+
+The Raspberry Pi kernel's dwc_otg driver now logs "Core Release: 2.80a"
+and "Dedicated Tx FIFOs mode" (before: 2.94a, "Shared Tx FIFO mode"),
+and host mode is unchanged: the raspi0 boot test (usb-net DHCP and
+ping over dwc_otg) and the raspi4b boot, socket and network tests pass.
+These are the values the stock dwc2 gadget driver derives its
+device-mode configuration from.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
+---
+ hw/usb/hcd-dwc2.c | 27 ++++++++++++---------------
+ 1 file changed, 12 insertions(+), 15 deletions(-)
+
+diff --git a/hw/usb/hcd-dwc2.c b/hw/usb/hcd-dwc2.c
+index e23c49e..4d2bff9 100644
+--- a/hw/usb/hcd-dwc2.c
++++ b/hw/usb/hcd-dwc2.c
+@@ -1278,21 +1278,18 @@ static void dwc2_reset_enter(Object *obj, ResetType type)
+     s->gi2cctl = GI2CCTL_I2CDATSE0 | GI2CCTL_ACK;
+     s->gpvndctl = 0;
+     s->ggpio = 0;
+-    s->guid = 0;
+-    s->gsnpsid = 0x4f54294a;
+-    s->ghwcfg1 = 0;
+-    s->ghwcfg2 = (8 << GHWCFG2_DEV_TOKEN_Q_DEPTH_SHIFT) |
+-                 (4 << GHWCFG2_HOST_PERIO_TX_Q_DEPTH_SHIFT) |
+-                 (4 << GHWCFG2_NONPERIO_TX_Q_DEPTH_SHIFT) |
+-                 GHWCFG2_DYNAMIC_FIFO |
+-                 GHWCFG2_PERIO_EP_SUPPORTED |
+-                 ((DWC2_NB_CHAN - 1) << GHWCFG2_NUM_HOST_CHAN_SHIFT) |
+-                 (GHWCFG2_INT_DMA_ARCH << GHWCFG2_ARCHITECTURE_SHIFT) |
+-                 (GHWCFG2_OP_MODE_NO_SRP_CAPABLE_HOST << GHWCFG2_OP_MODE_SHIFT);
+-    s->ghwcfg3 = (4096 << GHWCFG3_DFIFO_DEPTH_SHIFT) |
+-                 (4 << GHWCFG3_PACKET_SIZE_CNTR_WIDTH_SHIFT) |
+-                 (4 << GHWCFG3_XFER_SIZE_CNTR_WIDTH_SHIFT);
+-    s->ghwcfg4 = 0;
++    /*
++     * Identity and hardware configuration of the BCM2835's core, as read
++     * from a Raspberry Pi Zero W (identical on the BCM2711): core 2.80a,
++     * 8 host channels, 7 device endpoints + EP0, internal DMA, dedicated
++     * TX FIFOs, 4080 words of FIFO RAM, no descriptor DMA.
++     */
++    s->guid = 0x2708a000;
++    s->gsnpsid = 0x4f54280a;
++    s->ghwcfg1 = 0x00000000;
++    s->ghwcfg2 = 0x228ddd50;
++    s->ghwcfg3 = 0x0ff000e8;
++    s->ghwcfg4 = 0x1ff00020;
+     s->glpmcfg = 0;
+     s->gpwrdn = GPWRDN_PWRDNRSTN;
+     s->gdfifocfg = 0;
+-- 
+2.47.3
+
