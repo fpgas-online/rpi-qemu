@@ -1,4 +1,4 @@
-"""Debian patch-series setup for build-debs.py.
+"""Debian patch-series setup for prepare-source.py.
 
 Extracted into its own module so it's importable and testable. The
 single source of truth for patches is ``ci/qemu-patches/``; the Debian

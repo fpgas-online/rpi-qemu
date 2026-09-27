@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the Debian patch-setup logic used by build-debs.py.
+"""Tests for the Debian patch-setup logic used by prepare-source.py.
 
 Regression test for https://github.com/fpgas-online/rpi-qemu/issues/6:
 a stale checked-in ``series`` file silently dropped patches 0018-0022
