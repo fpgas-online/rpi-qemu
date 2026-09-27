@@ -1,4 +1,4 @@
-From 5b69cce2b16aed63af2edfa00059f6975ade28ae Mon Sep 17 00:00:00 2001
+From f761b17513a358ebd496a2dd5b8c4c72fe9ed982 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:40:09 +0930
 Subject: [PATCH] usbip-server: pace isochronous packets one per (micro)frame
@@ -21,22 +21,14 @@ accepted with every byte checked by the guest.
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/usbip-server.c | 57 ++++++++++++++++++++++++++++++++++---------
- 1 file changed, 46 insertions(+), 11 deletions(-)
+ hw/usb/usbip-server.c | 57 +++++++++++++++++++++++++++++++++++--------
+ 1 file changed, 47 insertions(+), 10 deletions(-)
 
 diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
-index 781fbc2..7b8fa71 100644
+index 781fbc2..bd0a987 100644
 --- a/hw/usb/usbip-server.c
 +++ b/hw/usb/usbip-server.c
-@@ -64,6 +64,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(USBIPServerState, USBIP_SERVER)
- #define USBIP_DEVNUM            1
- 
- /* Linux errno values: the wire carries these on every host OS. */
-+#define USBIP_EXDEV             18
- #define USBIP_ENODEV            19
- #define USBIP_EPIPE             32
- #define USBIP_EPROTO            71
-@@ -103,6 +104,9 @@ typedef struct USBIPURB {
+@@ -103,6 +103,9 @@ typedef struct USBIPURB {
      uint32_t flags;
      int32_t start_frame;
      int32_t number_of_packets;  /* >= 1 for isochronous URBs, else 0 */
@@ -46,25 +38,24 @@ index 781fbc2..7b8fa71 100644
      uint8_t setup[8];
      uint8_t *buf;
      uint32_t len;
-@@ -125,6 +129,7 @@ struct USBIPServerState {
+@@ -125,6 +128,9 @@ struct USBIPServerState {
      QTAILQ_HEAD(, USBIPURB) inflight;
      QTAILQ_HEAD(, USBIPURB) waiting[USBIP_NUM_KEYS];
      QEMUTimer *retry_timer;
 +    QEMUTimer *iso_timer;
++    /* Each endpoint's next ISO (micro)frame: URBs follow one another */
++    int64_t iso_next_due[USBIP_NUM_KEYS];
      QEMUBH *retry_bh;
      bool port_resetting;
      unsigned nurbs;             /* client URBs held */
-@@ -320,21 +325,43 @@ static void usbip_arm_retry(USBIPServerState *s)
+@@ -320,21 +326,43 @@ static void usbip_arm_retry(USBIPServerState *s)
      }
  }
  
-+/* The time between an ISO URB's packets: its interval in (micro)frames. */
-+static int64_t usbip_iso_period(USBIPServerState *s, USBIPURB *u)
++/* The length of a (micro)frame at the device's speed. */
++static int64_t usbip_iso_frame(USBIPServerState *s)
 +{
-+    int64_t frame = s->port.dev->speed == USB_SPEED_HIGH ? 125 * SCALE_US
-+                                                         : SCALE_MS;
-+
-+    return frame * MAX(u->interval, 1);
++    return s->port.dev->speed == USB_SPEED_HIGH ? 125 * SCALE_US : SCALE_MS;
 +}
 +
  /*
@@ -74,9 +65,11 @@ index 781fbc2..7b8fa71 100644
 + * Isochronous URBs: one USBPacket per ISO packet, synchronous (QEMU
 + * devices never answer ISO asynchronously), one per (micro)frame of the
 + * URB's interval as a host controller schedules them -- the device may
-+ * need that time to prepare the next packet.  A NAK is a frame without
-+ * data: an empty packet; a frame that has passed is missed (-EXDEV).
-+ * Returns true when the URB is complete.
++ * need that time to prepare the next packet -- and the endpoint's next URB
++ * carries on from where the last one ended.  A NAK is a frame without
++ * data: an empty packet.  If the server falls behind, the packet goes in
++ * the next frame of its schedule rather than being lost.  Returns true
++ * when the URB is complete.
   */
 -static void usbip_urb_iso(USBIPServerState *s, USBIPURB *u)
 +static bool usbip_urb_iso(USBIPServerState *s, USBIPURB *u)
@@ -85,28 +78,28 @@ index 781fbc2..7b8fa71 100644
      int pid = u->in ? USB_TOKEN_IN : USB_TOKEN_OUT;
      USBEndpoint *ep = usb_ep_get(dev, pid, u->epnum);
 -    int i;
--
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++    int64_t frame = usbip_iso_frame(s);
++    int64_t period = frame * MAX(u->interval, 1);
++    unsigned key = usbip_urb_key(u);
+ 
 -    for (i = 0; i < u->number_of_packets; i++) {
 -        USBIPIsoDesc *d = &u->iso[i];
-+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-+    int64_t period = usbip_iso_period(s, u);
- 
 +    if (u->iso_next == 0 && u->iso_due == 0) {
-+        u->iso_due = now;       /* URB_ISO_ASAP: start with this frame */
++        /* URB_ISO_ASAP: the endpoint's next frame, on a frame boundary */
++        u->iso_due = MAX(QEMU_ALIGN_UP(now, frame), s->iso_next_due[key]);
 +    }
-+    while (u->iso_next < u->number_of_packets && now >= u->iso_due) {
++    if (u->iso_next < u->number_of_packets && now >= u->iso_due) {
 +        USBIPIsoDesc *d = &u->iso[u->iso_next++];
-+
-+        u->iso_due += period;
-+        if (now >= u->iso_due) {
-+            d->actual_length = 0;       /* its frame has gone by */
-+            d->status = -USBIP_EXDEV;
-+            continue;
-+        }
+ 
++        do {
++            u->iso_due += period;
++        } while (u->iso_due <= now);
++        s->iso_next_due[key] = u->iso_due;
          usb_packet_setup(&u->packet, pid, ep, 0, u->seqnum, false, false);
          usb_packet_addbuf(&u->packet, u->buf + d->offset, d->length);
          usb_handle_packet(dev, &u->packet);
-@@ -350,7 +377,12 @@ static void usbip_urb_iso(USBIPServerState *s, USBIPURB *u)
+@@ -350,7 +378,12 @@ static void usbip_urb_iso(USBIPServerState *s, USBIPURB *u)
              d->status = usbip_urb_status(u);
          }
      }
@@ -119,7 +112,7 @@ index 781fbc2..7b8fa71 100644
  }
  
  /* An ISO URB for an endpoint that is not isochronous: every packet stalls. */
-@@ -376,10 +408,10 @@ static bool usbip_urb_try(USBIPServerState *s, USBIPURB *u)
+@@ -376,10 +409,10 @@ static bool usbip_urb_try(USBIPServerState *s, USBIPURB *u)
          ep = usb_ep_get(dev, u->in ? USB_TOKEN_IN : USB_TOKEN_OUT, u->epnum);
          if (u->epnum == 0 || ep->type != USB_ENDPOINT_XFER_ISOC) {
              usbip_urb_iso_stall(s, u);
@@ -133,15 +126,16 @@ index 781fbc2..7b8fa71 100644
      }
      if (u->epnum == 0) {
          pid = (u->setup[0] & USB_DIR_IN) ? USB_TOKEN_IN : USB_TOKEN_OUT;
-@@ -514,6 +546,7 @@ static void usbip_reset_connection(USBIPServerState *s)
+@@ -514,6 +547,8 @@ static void usbip_reset_connection(USBIPServerState *s)
      trace_usbip_server_connection("reset");
      usbip_cancel_all(s);
      timer_del(s->retry_timer);
 +    timer_del(s->iso_timer);
++    memset(s->iso_next_due, 0, sizeof(s->iso_next_due));
      s->conn = USBIP_CONN_NONE;
      s->enum_op = 0;
      s->enumerated = false;
-@@ -792,6 +825,7 @@ static void usbip_handle_submit(USBIPServerState *s, const uint8_t *d)
+@@ -792,6 +827,7 @@ static void usbip_handle_submit(USBIPServerState *s, const uint8_t *d)
      u->epnum = ldl_be_p(d + 0x10);
      u->flags = ldl_be_p(d + 0x14);
      u->start_frame = ldl_be_p(d + 0x1c);
@@ -149,7 +143,7 @@ index 781fbc2..7b8fa71 100644
      memcpy(u->setup, d + 0x28, sizeof(u->setup));
      if (!u->in) {
          memcpy(u->buf, d + USBIP_HDR_LEN, u->len);
-@@ -1097,6 +1131,7 @@ static void usbip_server_realize(DeviceState *dev, Error **errp)
+@@ -1097,6 +1133,7 @@ static void usbip_server_realize(DeviceState *dev, Error **errp)
          QTAILQ_INIT(&s->waiting[i]);
      }
      s->retry_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, usbip_retry_timer, s);
