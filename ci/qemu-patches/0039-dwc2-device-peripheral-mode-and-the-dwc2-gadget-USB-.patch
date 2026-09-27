@@ -1,4 +1,4 @@
-From efecd9a8c7bb09fb7d849689a00495718e5dbfb5 Mon Sep 17 00:00:00 2001
+From 5959534a3e291082ebd8b904af3ccc0ea77fa641 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1036 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1040 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1215 insertions(+), 25 deletions(-)
+ 5 files changed, 1219 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..55c068b
+index 0000000..9c922de
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1036 @@
+@@ -0,0 +1,1040 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -736,6 +736,10 @@ index 0000000..55c068b
 +    }
 +    if (val & DXEPCTL_SNAK) {
 +        v |= DXEPCTL_NAKSTS;
++        if (in) {
++            /* the core NAKs the next IN token at once: NAK effective */
++            dwc2_ep(s, n, true)[DEP_INT] |= DXEPINT_INEPNAKEFF;
++        }
 +    }
 +    if (val & DXEPCTL_CNAK) {
 +        v &= ~DXEPCTL_NAKSTS;
