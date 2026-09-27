@@ -57,7 +57,7 @@ if [ "$usb_found" = "0" ]; then
 fi
 # List USB serial devices
 echo "=== USB Serial Devices ==="
-ls -la /dev/ttyUSB* 2>/dev/null || echo "  No /dev/ttyUSB* devices"
+ls -la /dev/ttyUSB* 2>&1 || echo "  No /dev/ttyUSB* devices"
 
 # Bring up eth0
 echo "=== Bringing up eth0 ==="

@@ -153,6 +153,8 @@ def run_test():
          "-device", "usb-kbd",
          "-chardev", "null,id=usb-serial0",
          "-device", "usb-serial,chardev=usb-serial0",
+         "-netdev", "user,id=usb-net0",
+         "-device", "usb-net,netdev=usb-net0",
          "-serial", "stdio", "-display", "none", "-monitor", "none"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True)
@@ -254,7 +256,7 @@ def run_test():
     for line in text.split("\n"):
         s = line.strip()
         for kw in ["Raspberry Pi Bootloader", "Board serial",
-                    "DHCP client bound", "Loading.*kernel8",
+                    "DHCP client bound", "kernel8.img",
                     "Decompressed kernel", "Starting kernel",
                     "Booting Linux",
                     "bcmgenet", "dwc2", "USB:", "ttyUSB",
