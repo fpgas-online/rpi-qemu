@@ -1,4 +1,4 @@
-From 21e7e112adf8490f97a51e3a60e2feda77739c18 Mon Sep 17 00:00:00 2001
+From 097bf0d508074a88d849caa69b1efda0dc10e951 Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 00:24:03 +0930
 Subject: [PATCH] hw/usb: add a USB/IP server device
@@ -54,10 +54,10 @@ Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
  hw/usb/bus.c                  |    3 +-
  hw/usb/meson.build            |    1 +
  hw/usb/trace-events           |    8 +
- hw/usb/usbip-server.c         | 1108 +++++++++++++++++++++++++++++++++
+ hw/usb/usbip-server.c         | 1116 +++++++++++++++++++++++++++++++++
  include/hw/usb/usb.h          |    2 +
  include/hw/usb/usbip-server.h |   14 +
- 9 files changed, 1145 insertions(+), 1 deletion(-)
+ 9 files changed, 1153 insertions(+), 1 deletion(-)
  create mode 100644 hw/usb/usbip-server.c
  create mode 100644 include/hw/usb/usbip-server.h
 
@@ -159,10 +159,10 @@ index 0d4318d..1de3a6a 100644
 +usbip_server_enumerate(int step, int status) "step=%d status=%d"
 diff --git a/hw/usb/usbip-server.c b/hw/usb/usbip-server.c
 new file mode 100644
-index 0000000..84a8950
+index 0000000..f48149a
 --- /dev/null
 +++ b/hw/usb/usbip-server.c
-@@ -0,0 +1,1108 @@
+@@ -0,0 +1,1116 @@
 +/*
 + * USB/IP server: exports the QEMU USB device on its port over USB/IP
 + *
@@ -918,12 +918,20 @@ index 0000000..84a8950
 +
 +static void usbip_handle_submit(USBIPServerState *s, const uint8_t *d)
 +{
-+    USBIPURB *u = usbip_urb_new(ldl_be_p(d + 0x04), ldl_be_p(d + 0x18));
++    bool in = ldl_be_p(d + 0x0c) == USBIP_DIR_IN;
 +    int32_t np = ldl_be_p(d + 0x20);
 +    const uint8_t *desc;
++    USBIPURB *u;
 +    int i;
 +
-+    u->in = ldl_be_p(d + 0x0c) == USBIP_DIR_IN;
++    /* EP0: the data stage direction is the SETUP's */
++    if (ldl_be_p(d + 0x10) == 0 && in != !!(d[0x28] & USB_DIR_IN)) {
++        usbip_drop_client(s, "control URB direction disagrees with its SETUP");
++        return;
++    }
++    u = usbip_urb_new(ldl_be_p(d + 0x04), ldl_be_p(d + 0x18));
++
++    u->in = in;
 +    u->epnum = ldl_be_p(d + 0x10);
 +    u->flags = ldl_be_p(d + 0x14);
 +    u->start_frame = ldl_be_p(d + 0x1c);
