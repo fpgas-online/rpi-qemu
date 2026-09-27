@@ -1,0 +1,161 @@
+From f046f982ba6d7c8e4bef0e1f13c3314f175e4430 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 19:14:05 +0930
+Subject: [PATCH] raspi: route GPIO 14/15 to serial0 like the firmware's
+ enable_uart
+
+Raspberry Pi device trees ship the primary UART's pin group (uart1_pins
+on the Zero W, where serial0 is the mini UART) as an empty placeholder --
+"brcm,pins; brcm,function; brcm,pull;" -- which the VideoCore firmware
+fills in with GPIO 14/15 when enable_uart=1.  With -kernel/-dtb there is
+no firmware, so the UART's only pinctrl group has no pins, the pinctrl
+core fails the default state and the UART never registers a tty
+(rpi-qemu#28: "bcm2835-aux-uart 20215040.serial: there is not valid maps
+for state default").
+
+Do the firmware's fixup in a modify_dtb hook for the raspi0-3 machines:
+when every group serial0's pinctrl-0 refers to is an empty placeholder,
+fill the first with GPIO 14/15 in ALT5 (mini UART) or ALT0 (PL011), TX
+without pull and RX pulled up, as the DT's populated UART groups are
+(e.g. uart1_bt_pins).  Populated groups and other placeholders (e.g.
+audio_pins, filled only for boards with an audio jack) are left alone.
+A failure to update the DTB is reported with warn_report().
+
+Checked with -machine dumpdtb on the stock bcm2708-rpi-zero-w.dtb: the
+only change besides QEMU's usual memory node is uart1_pins becoming
+brcm,pins = <14 15>, brcm,function = <2>, brcm,pull = <0 2>.
+
+Part of https://github.com/fpgas-online/rpi-qemu/issues/28
+---
+ hw/arm/raspi.c | 101 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 101 insertions(+)
+
+diff --git a/hw/arm/raspi.c b/hw/arm/raspi.c
+index 3f99e87..b100895 100644
+--- a/hw/arm/raspi.c
++++ b/hw/arm/raspi.c
+@@ -26,6 +26,7 @@
+ #include "hw/core/loader.h"
+ #include "hw/arm/machines-qom.h"
+ #include "qom/object.h"
++#include <libfdt.h>
+ 
+ #define TYPE_RASPI_MACHINE  MACHINE_TYPE_NAME("raspi-common")
+ OBJECT_DECLARE_SIMPLE_TYPE(RaspiMachineState, RASPI_MACHINE)
+@@ -189,6 +190,105 @@ static void reset_secondary(ARMCPU *cpu, const struct arm_boot_info *info)
+     cpu_set_pc(cs, info->smp_loader_start);
+ }
+ 
++/* BCM2835 GPIO function-select values and the primary UART's pins */
++#define BCM2835_FSEL_ALT0       4
++#define BCM2835_FSEL_ALT5       2
++#define BCM2835_PULL_NONE       0
++#define BCM2835_PULL_UP         2
++#define RPI_UART_TXD_GPIO       14
++#define RPI_UART_RXD_GPIO       15
++
++typedef enum {
++    RPI_UART_NONE,
++    RPI_UART_PL011,
++    RPI_UART_MINI,
++} RaspiUartKind;
++
++/* Node offset of the UART the DT alias serial<n> names, and its kind. */
++static int raspi_serial_alias(void *fdt, unsigned long n, RaspiUartKind *kind)
++{
++    g_autofree char *name = g_strdup_printf("serial%lu", n);
++    const char *path;
++    int alias, node;
++
++    *kind = RPI_UART_NONE;
++    alias = fdt_path_offset(fdt, "/aliases");
++    path = alias < 0 ? NULL : fdt_getprop(fdt, alias, name, NULL);
++    node = path ? fdt_path_offset(fdt, path) : -1;
++    if (node < 0) {
++        return -1;
++    }
++    if (fdt_node_check_compatible(fdt, node, "brcm,bcm2835-aux-uart") == 0) {
++        *kind = RPI_UART_MINI;
++    } else if (fdt_node_check_compatible(fdt, node, "arm,pl011") == 0) {
++        *kind = RPI_UART_PL011;
++    }
++    return node;
++}
++
++/*
++ * Raspberry Pi device trees ship the primary UART's pin group (uart0_pins
++ * or uart1_pins) as an empty placeholder -- "brcm,pins;" with no value --
++ * which the VideoCore firmware fills in with GPIO 14/15 when enable_uart=1.
++ * With -kernel/-dtb there is no firmware, so whichever UART serial0 names
++ * keeps a pinctrl state with no pins, the pinctrl core fails it ("there is
++ * not valid maps for state default") and the UART never registers a tty.
++ * Do the firmware's fixup: if every group serial0's default pinctrl state
++ * refers to is empty, route GPIO 14/15 to that UART (ALT0 for the PL011,
++ * ALT5 for the mini UART), TX without pull and RX pulled up as the DTs'
++ * populated UART groups do.
++ */
++static void raspi_fixup_serial0_pins(void *fdt)
++{
++    fdt32_t pins[] = { cpu_to_fdt32(RPI_UART_TXD_GPIO),
++                       cpu_to_fdt32(RPI_UART_RXD_GPIO) };
++    fdt32_t pull[] = { cpu_to_fdt32(BCM2835_PULL_NONE),
++                       cpu_to_fdt32(BCM2835_PULL_UP) };
++    const fdt32_t *pinctrl;
++    RaspiUartKind kind;
++    uint32_t fsel;
++    int node, group = -1, len, i;
++
++    node = raspi_serial_alias(fdt, 0, &kind);
++    if (kind == RPI_UART_MINI) {
++        fsel = BCM2835_FSEL_ALT5;
++    } else if (kind == RPI_UART_PL011) {
++        fsel = BCM2835_FSEL_ALT0;
++    } else {
++        return;
++    }
++
++    pinctrl = fdt_getprop(fdt, node, "pinctrl-0", &len);
++    if (!pinctrl || len < (int)sizeof(fdt32_t)) {
++        return;
++    }
++    for (i = 0; i < len / (int)sizeof(fdt32_t); i++) {
++        int g = fdt_node_offset_by_phandle(fdt, fdt32_to_cpu(pinctrl[i]));
++        int pins_len;
++
++        if (g < 0 || !fdt_getprop(fdt, g, "brcm,pins", &pins_len)) {
++            return;
++        }
++        if (pins_len > 0) {
++            return;     /* already populated: not a firmware placeholder */
++        }
++        if (group < 0) {
++            group = g;
++        }
++    }
++
++    if (fdt_setprop(fdt, group, "brcm,pins", pins, sizeof(pins)) < 0 ||
++        fdt_setprop_u32(fdt, group, "brcm,function", fsel) < 0 ||
++        fdt_setprop(fdt, group, "brcm,pull", pull, sizeof(pull)) < 0) {
++        warn_report("raspi: could not route GPIO 14/15 to serial0 in the DTB");
++    }
++}
++
++static void raspi_modify_dtb(const struct arm_boot_info *info, void *fdt)
++{
++    raspi_fixup_serial0_pins(fdt);
++}
++
+ static void setup_boot(MachineState *machine, ARMCPU *cpu,
+                        RaspiProcessorId processor_id, size_t ram_size)
+ {
+@@ -309,6 +409,7 @@ void raspi_machine_init(MachineState *machine)
+     BCM283XState *soc = &s->soc;
+ 
+     s_base->binfo.board_id = MACH_TYPE_BCM2708;
++    s_base->binfo.modify_dtb = raspi_modify_dtb;
+ 
+     object_initialize_child(OBJECT(machine), "soc", soc,
+                             board_soc_type(mc->board_rev));
+-- 
+2.47.3
+
