@@ -218,11 +218,43 @@ jobs:
     with:
       qemu-source: artifact
 
+  usbip-interop:
+    # The kernel's own USB/IP host (vhci-hcd) importing a device exported
+    # by this run's QEMU -- the interop usbip-server exists for.  Runs on
+    # the VM itself (not in a container) so it can load vhci-hcd, with the
+    # static binary, which runs on the runner's Ubuntu.
+    name: USB/IP interop (vhci-hcd)
+    needs: [build-static]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the static QEMU built by this run
+        uses: actions/download-artifact@v4
+        with:
+          name: qemu-rpi-static
+          path: tmp/static
+
+      - name: Load vhci-hcd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          sudo modprobe vhci-hcd
+          ls /sys/devices/platform/vhci_hcd.0
+
+      - name: Run USB/IP interop test
+        run: |
+          tar xzf tmp/static/qemu-rpi-static-linux-amd64.tar.gz -C tmp/static
+          sudo QEMU_OVERRIDE="$PWD/tmp/static/qemu-rpi-system-aarch64-static" \
+            python3 run-usbip-vhci-test.py
+
   stage-apt:
     # Gather this run's .debs (plus the pxeboot firmware deb, built here) into
     # the artifact the shared publish workflow indexes: debs-<suite>-<arch>.
     name: Stage APT packages
-    needs: [build-debs, build-pxeboot, boot-test]
+    needs: [build-debs, build-pxeboot, boot-test, usbip-interop]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
