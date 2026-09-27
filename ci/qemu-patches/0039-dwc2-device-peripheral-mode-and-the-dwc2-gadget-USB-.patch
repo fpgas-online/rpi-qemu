@@ -1,4 +1,4 @@
-From 683751ff384bff8193b4c3aab5cbaaf1775d4d74 Mon Sep 17 00:00:00 2001
+From 8e2c4f9a1b553fd2567c48862c59fe989debdcec Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -63,20 +63,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1078 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1085 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1257 insertions(+), 25 deletions(-)
+ 5 files changed, 1264 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..4e3e231
+index 0000000..a784a00
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1078 @@
+@@ -0,0 +1,1085 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -481,6 +481,13 @@ index 0000000..4e3e231
 +    USBPacket *p = g->ctrl_p;
 +
 +    trace_usb_dwc2_gadget_ctrl_complete(status, g->ctrl_done);
++    if (status == USB_RET_SUCCESS &&
++        g->parent_obj.setup_buf[0] == (USB_DIR_OUT | USB_TYPE_STANDARD |
++                                       USB_RECIP_DEVICE) &&
++        g->parent_obj.setup_buf[1] == USB_REQ_SET_ADDRESS) {
++        /* the address QEMU's host controllers find the device by */
++        g->parent_obj.addr = g->parent_obj.setup_buf[2];
++    }
 +    g->ctrl_p = NULL;
 +    g->ctrl_phase = DWC2_CTRL_IDLE;
 +    p->status = status;
