@@ -1,0 +1,95 @@
+From 76ff044183f6d1ddfb8deb38f130b171f0aae0b6 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Sun, 27 Sep 2026 20:06:53 +0930
+Subject: [PATCH] dwc2: make GINTSTS.HCHINT follow HAINT & HAINTMSK
+
+GINTSTS.HCHINT is level-sensitive: it reflects whether any channel
+interrupt in HAINT is unmasked in HAINTMSK.  The model only raised it
+when a HAINT bit newly appeared while unmasked and only lowered it when a
+HAINT bit cleared; a HAINTMSK write never re-evaluated it.
+
+The Raspberry Pi dwc_otg driver's FIQ state machine (fiq_fsm_enable=1,
+the default on every 32-bit Pi) relies on exactly that: for a channel it
+can't service in the FIQ it clears that channel's HAINTMSK bit ("HAINT is
+level-sensitive, leading to level-sensitive gintsts.b.hcint bit. Mask
+HAINT(i) but keep top-level hcint unmasked") and kicks the IRQ through
+MPHI.  With HCHINT stuck high the FIQ re-fired forever, starving the IRQ:
+on -M raspi0 with the Zero W's 6.18 kernel every USB device -- a keyboard,
+a usb-net NIC, the auto hub -- froze the guest at "usb 1-1: new
+full-speed USB device number 2 using dwc_otg", with 2.8M FIQs against 529
+IRQs in 25 s (-d int) and the FIQ endlessly writing GINTSTS 0x02000000
+(ignored, HCHINT is read-only) and an unchanged GINTMSK.  Booting with
+dwc_otg.fiq_fsm_enable=0 avoided it, pointing at the FSM path.
+
+Re-evaluate HCHINT from HAINT & HAINTMSK whenever either changes,
+including on HAINTMSK writes, which also makes unmasking an already
+pending channel raise it.
+
+With this, the same boot enumerates the hub and keyboard with the FIQ
+FSM enabled, and a usb-net NIC binds cdc_ether as usb0, gets a DHCP lease
+from -netdev user (10.0.2.15) and pings 10.0.2.2 with 0% loss.
+---
+ hw/usb/hcd-dwc2.c | 27 +++++++++++++++++++++------
+ 1 file changed, 21 insertions(+), 6 deletions(-)
+
+diff --git a/hw/usb/hcd-dwc2.c b/hw/usb/hcd-dwc2.c
+index cd3b611..e23c49e 100644
+--- a/hw/usb/hcd-dwc2.c
++++ b/hw/usb/hcd-dwc2.c
+@@ -96,15 +96,27 @@ static inline void dwc2_lower_global_irq(DWC2State *s, uint32_t intr)
+     }
+ }
+ 
++/*
++ * GINTSTS.HCHINT is level-sensitive: it is set exactly while some channel
++ * interrupt in HAINT is unmasked in HAINTMSK, so it must follow changes to
++ * either register.
++ */
++static inline void dwc2_update_hchint(DWC2State *s)
++{
++    if (s->haint & s->haintmsk) {
++        dwc2_raise_global_irq(s, GINTSTS_HCHINT);
++    } else {
++        dwc2_lower_global_irq(s, GINTSTS_HCHINT);
++    }
++}
++
+ static inline void dwc2_raise_host_irq(DWC2State *s, uint32_t host_intr)
+ {
+     if (!(s->haint & host_intr)) {
+         s->haint |= host_intr;
+         s->haint &= 0xffff;
+         trace_usb_dwc2_raise_host_irq(host_intr);
+-        if (s->haint & s->haintmsk) {
+-            dwc2_raise_global_irq(s, GINTSTS_HCHINT);
+-        }
++        dwc2_update_hchint(s);
+     }
+ }
+ 
+@@ -113,9 +125,7 @@ static inline void dwc2_lower_host_irq(DWC2State *s, uint32_t host_intr)
+     if (s->haint & host_intr) {
+         s->haint &= ~host_intr;
+         trace_usb_dwc2_lower_host_irq(host_intr);
+-        if (!(s->haint & s->haintmsk)) {
+-            dwc2_lower_global_irq(s, GINTSTS_HCHINT);
+-        }
++        dwc2_update_hchint(s);
+     }
+ }
+ 
+@@ -951,6 +961,11 @@ static void dwc2_hreg0_write(void *ptr, hwaddr addr, int index, uint64_t val,
+ 
+     *mmio = val;
+ 
++    if (addr == HAINTMSK) {
++        /* (un)masking a pending channel interrupt changes HCHINT */
++        dwc2_update_hchint(s);
++    }
++
+     if (iflg > 0) {
+         trace_usb_dwc2_hreg0_action("enable PRTINT");
+         dwc2_raise_global_irq(s, GINTSTS_PRTINT);
+-- 
+2.47.3
+
