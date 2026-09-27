@@ -1,4 +1,4 @@
-From 296ffd5700b49684db7e3e758ef257a1d075af0d Mon Sep 17 00:00:00 2001
+From 88e02043d7e2f1f8b4bc63d2f669b24ec210282a Mon Sep 17 00:00:00 2001
 From: Tim 'mithro' Ansell <me@mith.ro>
 Date: Mon, 28 Sep 2026 01:06:38 +0930
 Subject: [PATCH] dwc2: device (peripheral) mode, and the dwc2-gadget USB
@@ -47,8 +47,15 @@ The device side:
   transfers where they would on the wire and one host transfer may span
   several guest transfers (or the reverse).  An endpoint the guest has
   not activated stalls.  Isochronous endpoints move one packet per
-  (micro)frame without waiting.  Activating an endpoint publishes its
-  type to QEMU's USB core (usb_ep_set_type).
+  (micro)frame without waiting; a token for an idle one raises NAK (IN)
+  or OUTTknEPdis (OUT), from which the driver starts its stream.
+  Activating an endpoint publishes its type to QEMU's USB core
+  (usb_ep_set_type); a controller reset clears them.
+- SNAK on an IN endpoint is effective at once (DIEPINT.INEPNakEff, which
+  the driver waits for with dedicated FIFOs); the global IN NAK applies
+  to the non-periodic endpoints.  A bus or controller reset ends the
+  host's transfers in progress (USB_RET_IOERROR), and a SET_ADDRESS the
+  guest completes sets the device address QEMU's host controllers use.
 
 Tested with the stock Raspberry Pi Zero W kernel (6.18.52+, dwc2 module,
 dtoverlay=dwc2 applied with fdtoverlay) on raspi0, a configfs gadget
@@ -63,20 +70,20 @@ parameter warnings.  Host mode is unchanged (raspi0 usb-net, raspi4b).
 Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
 ---
- hw/usb/dwc2-gadget.c | 1108 ++++++++++++++++++++++++++++++++++++++++++
+ hw/usb/dwc2-gadget.c | 1114 ++++++++++++++++++++++++++++++++++++++++++
  hw/usb/hcd-dwc2.c    |  125 ++++-
  hw/usb/hcd-dwc2.h    |   67 +++
  hw/usb/meson.build   |    2 +-
  hw/usb/trace-events  |   10 +
- 5 files changed, 1287 insertions(+), 25 deletions(-)
+ 5 files changed, 1293 insertions(+), 25 deletions(-)
  create mode 100644 hw/usb/dwc2-gadget.c
 
 diff --git a/hw/usb/dwc2-gadget.c b/hw/usb/dwc2-gadget.c
 new file mode 100644
-index 0000000..db935db
+index 0000000..784f7a8
 --- /dev/null
 +++ b/hw/usb/dwc2-gadget.c
-@@ -0,0 +1,1108 @@
+@@ -0,0 +1,1114 @@
 +/*
 + * dwc-hsotg (dwc2) USB OTG controller: device (peripheral) mode
 + *
@@ -909,6 +916,12 @@ index 0000000..db935db
 +        dwc2_gadget_fail_packets(g);
 +        timer_del(g->reset_timer);
 +        g->reset_phase = 0;
++        for (n = 1; n < DWC2_NB_EP; n++) {
++            usb_ep_set_type(USB_DEVICE(g), USB_TOKEN_IN, n,
++                            USB_ENDPOINT_XFER_INVALID);
++            usb_ep_set_type(USB_DEVICE(g), USB_TOKEN_OUT, n,
++                            USB_ENDPOINT_XFER_INVALID);
++        }
 +    }
 +    dwc2_session_apply(s, false);
 +}
