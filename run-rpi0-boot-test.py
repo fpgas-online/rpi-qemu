@@ -21,7 +21,9 @@ Regression checks for:
   - rpi-qemu#28: the mini UART registering ttyS0 and carrying the console,
     which needs QEMU to do the firmware's DT/cmdline fixups (GPIO 14/15
     pins for serial0, the DTB's own bootargs -- with 8250.nr_uarts=1 --
-    kept ahead of -append, console=serial0 -> ttyS0).
+    kept ahead of -append, console=serial0 -> ttyS0);
+  - rpi-qemu#39: a discard (SD erase) of a GiB of the SD card taking
+    seconds, not minutes, and leaving exactly that range reading as zeroes.
 
 Serial wiring: -serial #1 is the PL011 (the Zero W's Bluetooth UART, not
 used here), -serial #2 the mini UART = serial0 = the console.
@@ -39,6 +41,7 @@ Usage: uv run run-rpi0-boot-test.py
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -62,6 +65,17 @@ DTB = BASE / "test-images" / "rpi0" / "bcm2708-rpi-zero-w.dtb"
 # otherwise owns the PL011's input via serdev -- is disabled.
 DTB_DISABLE_BT = BASE / "test-images" / "rpi0" / "bcm2708-rpi-zero-w-disable-bt.dtb"
 INITRD = BASE / "test-images" / "test-initramfs-rpi0.cpio.gz"
+# A sparse 4 GiB card, so an SDHC one (block-addressed erase, #39).
+SD_CARD = BASE / "test-images" / "rpi0-sd.img"
+SD_SIZE = 4 << 30
+GIB, MIB = 1 << 30, 1 << 20
+# The guest discards [1 GiB, 2 GiB).  Marker MiBs at each end of that range,
+# inside it (must read as zeroes after) and outside it (must be untouched).
+SD_MARKERS = [(GIB - MIB, 0x5a, True), (GIB, 0xa5, False),
+              (2 * GIB - MIB, 0xa5, False), (2 * GIB, 0x5a, True)]
+# The guest's discard of 1 GiB must take no longer than this (a card erases
+# it in well under a second; block by block it took about 40 s).
+SD_DISCARD_MAX_S = 10
 
 # Raspberry Pi OS's own console argument; QEMU must rewrite it like the
 # firmware does.  earlycon shows the boot before ttyS0 exists.
@@ -85,6 +99,28 @@ def check_prerequisites():
         print("\n".join(missing))
         return False
     return True
+
+
+def make_sd_card():
+    with open(SD_CARD, "wb") as f:
+        f.truncate(SD_SIZE)
+        for offset, byte, _ in SD_MARKERS:
+            f.seek(offset)
+            f.write(bytes([byte]) * MIB)
+
+
+def sd_card_checks():
+    """(name, ok) for each marker MiB of the card after the boot."""
+    checks = []
+    with open(SD_CARD, "rb") as f:
+        for offset, byte, kept in SD_MARKERS:
+            f.seek(offset)
+            data = f.read(MIB)
+            want = bytes([byte if kept else 0]) * MIB
+            what = f"kept ({byte:#04x})" if kept else "erased to zeroes"
+            checks.append((f"SD MiB at {offset / GIB:.3f} GiB {what} (#39)",
+                           data == want))
+    return checks
 
 
 def boot_guest(serials, bootargs, on_ready, dtb=DTB):
@@ -163,12 +199,15 @@ def run_test():
     # the RX line: the mini UART has no break detection (BCM2835 ARM
     # Peripherals 2.2), so the line must arrive intact and no SysRq fire.
     print("\n--- Boot 1: console on the mini UART (ttyS0) ---")
+    make_sd_card()
     text, stderr_text = boot_guest(
         ["-serial", "null",          # PL011 (Bluetooth UART on a Zero W)
          "-serial", "mon:stdio",     # mini UART = serial0 = console
          # A USB Ethernet adapter on the OTG port, as a Zero gets wired
          # networking (rpi-qemu#24); DHCP comes from -netdev user.
-         "-netdev", "user,id=usbnet0", "-device", "usb-net,netdev=usbnet0"],
+         "-netdev", "user,id=usbnet0", "-device", "usb-net,netdev=usbnet0",
+         # An SD card for the erase test (#39)
+         "-drive", f"file={SD_CARD},format=raw,if=sd"],
         BOOTARGS + " sysrq_always_enabled",
         lambda send: (send(BREAK, 1.0), send(RX_LINE + "\n")))
 
@@ -204,6 +243,8 @@ def run_test():
         ("DWC2 has dedicated TX FIFOs (#22)", "Dedicated Tx FIFOs mode"),
         ("DHCP over usb-net (#24)", "lease of 10.0.2.15 obtained from 10.0.2.2"),
         ("Ping over usb-net (#24)", "3 packets transmitted, 3 packets received"),
+        ("SD discard succeeds (#39)", "SD discard: rc=0 "),
+        ("SD erased blocks read as zeroes (#39)", "SD erased nonzero bytes: 0\n"),
         ("cpuinfo Revision (#25)", "Revision: 920092"),
         ("cpuinfo Serial (#25)",   f"Serial: {BOARD_SERIAL}"),
         ("DT serial-number (#25)", f"DT serial-number: {BOARD_SERIAL}"),
@@ -243,6 +284,16 @@ def run_test():
         all_pass &= ok
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}"
               + ("" if exercised else " (not exercised)"))
+    m = re.search(r"SD discard: rc=\d+ in (\d+) s", text)
+    ok = m is not None and int(m.group(1)) <= SD_DISCARD_MAX_S
+    all_pass &= ok
+    print(f"  [{'PASS' if ok else 'FAIL'}] SD discard of 1 GiB within "
+          f"{SD_DISCARD_MAX_S} s (#39)"
+          + (f": {m.group(1)} s" if m else ": no timing"))
+    for name, ok in sd_card_checks():
+        all_pass &= ok
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
+    SD_CARD.unlink()
     for name, pattern in pl011_checks:
         found = pattern in pl011_text
         all_pass &= found
@@ -260,7 +311,7 @@ def run_test():
         for kw in ["Linux version", "Kernel command line", "power domains",
                    "external abort", "PC is at", "ttyS0", "Cmdline:",
                    "Console:", "RX test:", "Revision:", "Serial:",
-                   "USB NIC:", "lease of", "packets transmitted",
+                   "USB NIC:", "lease of", "packets transmitted", "SD ",
                    "serial-number:", "raspi0 test complete"]:
             if kw in s:
                 print(f"  > {s[:150]}")

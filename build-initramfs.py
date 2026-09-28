@@ -247,6 +247,19 @@ else
     echo "USB NIC: none"
 fi
 
+# SD card erase (rpi-qemu#39): the harness's 4 GiB (SDHC) card; discard
+# its second GiB, as fstrim does.  The erase must take as little time as
+# on a card (the vCPU waits for it), and the harness checks the image.
+if [ -b /dev/mmcblk0 ]; then
+    t0=$(date +%s)
+    blkdiscard -o 1073741824 -l 1073741824 /dev/mmcblk0 2>&1
+    echo "SD discard: rc=$? in $(( $(date +%s) - t0 )) s"
+    # erased blocks read as zeroes, as the SCR says
+    echo "SD erased nonzero bytes: $(dd if=/dev/mmcblk0 bs=1M skip=1024 count=1 | tr -d '\\000' | wc -c)"
+else
+    echo "SD card: no mmcblk0"
+fi
+
 # Board identity the firmware publishes in the DT (rpi-qemu#25).
 echo "Revision: $(sed -n 's/^Revision[[:space:]]*: //p' /proc/cpuinfo)"
 echo "Serial: $(sed -n 's/^Serial[[:space:]]*: //p' /proc/cpuinfo)"
