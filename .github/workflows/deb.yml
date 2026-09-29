@@ -37,6 +37,10 @@ jobs:
           uv run ci/test_build_debs.py
           uv run ci/test_prepare_source.py
           uv run ci/test_usbip_client.py
+      # The release job runs only on main: check its asset naming on every
+      # build (ci/release-assets.sh).
+      - name: Release asset names
+        run: sh ci/release-assets-test.sh
 
   build-deb:
     name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
@@ -245,7 +249,9 @@ jobs:
   # contents: write and runs this repository's scripts.
   release:
     if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-    needs: build-deb
+    # After the publish: a build whose apt repository didn't deploy isn't
+    # released either, and a re-run of the workflow does both.
+    needs: [build-deb, publish-apt]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -261,7 +267,6 @@ jobs:
           python3 -c 'import tomllib; print("version=" + tomllib.load(open("upstreams.toml", "rb"))["qemu-rpi"]["version"])' >> "$GITHUB_OUTPUT"
 
       # sid's version: no ~deb<R>. No epoch, which a tag can't carry (":").
-      # TODO: @main once apt-repo-action#27 merges.
       - name: Version
         id: version
         uses: mithro/apt-repo-action/deb-version@main
@@ -275,19 +280,15 @@ jobs:
           pattern: "*-*-*"
           path: artifacts/
 
-      - name: Name each package by its suite
+      # Every package as <suite>_<file>, named as GitHub will store it (~
+      # becomes .), the static binary build-deb's trixie amd64 job built and
+      # tested, and SHA256SUMS over them (ci/release-assets.sh).
+      - name: The release's assets
         run: |
-          mkdir -p release
-          for dir in artifacts/debs-* artifacts/dbgsym-*; do
-            [ -d "$dir" ] || continue
-            suite=$(basename "$dir" | cut -d- -f2)
-            for deb in "$dir"/*.deb; do
-              cp -v "$deb" "release/${suite}_$(basename "$deb")"
-            done
-          done
-          # build-deb's trixie amd64 job built and tested it.
-          cp -v artifacts/qemu-rpi-static/qemu-rpi-static-linux-amd64.tar.gz release/
+          sh ci/release-assets.sh artifacts release \
+            artifacts/qemu-rpi-static/qemu-rpi-static-linux-amd64.tar.gz
           ls -lh release/
+          cat release/SHA256SUMS
 
       - name: Create the release
         uses: softprops/action-gh-release@v2
@@ -302,6 +303,7 @@ jobs:
 
             Install from the apt repository (trixie, forky, sid; amd64, arm64, riscv64): see
             https://fpgas.online/rpi-qemu/ or the README. Or download the static binary
-            (amd64, no dependencies). The .debs here are named <suite>_<file>.
+            (amd64, no dependencies). The .debs here are named <suite>_<file>, with
+            GitHub's . for ~ (so ~deb13 reads .deb13); SHA256SUMS lists them all.
           files: release/*
           make_latest: true
