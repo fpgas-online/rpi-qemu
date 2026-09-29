@@ -1,0 +1,103 @@
+From 3010a5e25bdec1950954270bb9ea5b7f331d4897 Mon Sep 17 00:00:00 2001
+From: Tim 'mithro' Ansell <me@mith.ro>
+Date: Mon, 28 Sep 2026 19:08:10 +0930
+Subject: [PATCH] sd: erase a range as one zero write, as the SCR says erased
+ data reads
+
+sd_erase() wrote a 0xff fill to the backing file one 512-byte block at a
+time.  That took about 160 ms of host time per 4 MiB with the vCPU
+stopped: Raspberry Pi OS's fstrim of a few GiB of free space went silent
+long enough for the BCM2835 PM watchdog to reset the board -- mid-way
+through first boot's writes to the FAT boot partition, which it left
+corrupt.
+
+The fill was also the wrong one: the SCR's DATA_STAT_AFTER_ERASE is clear
+(and an eMMC's ERASED_MEM_CONT is 0), so erased data reads as zeroes.
+
+Erase a range as a blk_pwrite_zeroes() with BDRV_REQ_MAY_UNMAP, which
+the block layer can do by discarding.  SDHC/SDXC (and eMMC) cards have
+no write protect groups, so the whole range goes in one request, clamped
+to the card; SDSC cards still step over protected groups, erasing each
+unprotected block to zeroes.  An end before the start erases nothing, as
+the loop did.
+
+A 1 GiB discard now takes well under a second (it took 45 s).
+
+Resolves: https://github.com/fpgas-online/rpi-qemu/issues/39
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MSxgFokyz65AL7GTVbUaZS
+---
+ hw/sd/sd.c | 46 ++++++++++++++++++++++++++++++++++++----------
+ 1 file changed, 36 insertions(+), 10 deletions(-)
+
+diff --git a/hw/sd/sd.c b/hw/sd/sd.c
+index a30c541..40da4ea 100644
+--- a/hw/sd/sd.c
++++ b/hw/sd/sd.c
+@@ -1131,6 +1131,16 @@ static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
+     }
+ }
+ 
++/* Erase [addr, addr + len): erased blocks read as zeroes */
++static void sd_blk_erase(SDState *sd, uint64_t addr, uint64_t len)
++{
++    addr += sd_part_offset(sd);
++    if (!sd->blk ||
++        blk_pwrite_zeroes(sd->blk, addr, len, BDRV_REQ_MAY_UNMAP) < 0) {
++        fprintf(stderr, "sd_blk_erase: write error on host side\n");
++    }
++}
++
+ static bool rpmb_calc_hmac(SDState *sd, const RPMBDataFrame *frame,
+                            unsigned int num_blocks, uint8_t *mac)
+ {
+@@ -1352,19 +1362,35 @@ static void sd_erase(SDState *sd)
+     sd->erase_end = INVALID_ADDRESS;
+     sd->csd[14] |= 0x40;
+ 
+-    memset(sd->data, 0xff, erase_len);
++    if (erase_end < erase_start) {
++        return;                 /* an empty range */
++    }
++
++    /*
++     * Erased blocks read as zeroes, as the SCR's DATA_STAT_AFTER_ERASE (an
++     * eMMC's ERASED_MEM_CONT) says: an erase is a zero write, which the
++     * host may do by discarding -- as quickly as a card erases.  Writing a
++     * fill one 512-byte block at a time took 160 ms per 4 MiB with the
++     * guest stopped, so a trim of a few GiB let the SoC watchdog reset
++     * the board.
++     */
++    if (!sdsc) {
++        /* No write protect groups to skip: erase the range at once */
++        sd_blk_erase(sd, erase_start,
++                     MIN(erase_end + erase_len, sd->size) - erase_start);
++        return;
++    }
++
+     for (erase_addr = erase_start; erase_addr <= erase_end;
+          erase_addr += erase_len) {
+-        if (sdsc) {
+-            /* Only SDSC cards support write protect groups */
+-            wpnum = sd_addr_to_wpnum(erase_addr);
+-            assert(wpnum < sd->wp_group_bits);
+-            if (test_bit(wpnum, sd->wp_group_bmap)) {
+-                sd->card_status |= WP_ERASE_SKIP;
+-                continue;
+-            }
++        /* Only SDSC cards support write protect groups */
++        wpnum = sd_addr_to_wpnum(erase_addr);
++        assert(wpnum < sd->wp_group_bits);
++        if (test_bit(wpnum, sd->wp_group_bmap)) {
++            sd->card_status |= WP_ERASE_SKIP;
++            continue;
+         }
+-        sd_blk_write(sd, erase_addr, erase_len);
++        sd_blk_erase(sd, erase_addr, erase_len);
+     }
+ }
+ 
+-- 
+2.47.3
+
