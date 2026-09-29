@@ -36,6 +36,7 @@ jobs:
         run: |
           uv run ci/test_build_debs.py
           uv run ci/test_prepare_source.py
+          uv run ci/test_usbip_client.py
 
   build-deb:
     name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
