@@ -229,16 +229,20 @@ ci/
   rpi_4_qemu_defconfig   U-Boot config for interactive testing
   rpi_4_qemu_pxeboot_defconfig  U-Boot config for PXE boot firmware
   prepare-source.py      Fetch a pin and put our patches and debian/ into it
-  boot-test.sh           The boot tests, against freshly built packages
+  boot-test.sh           The boot tests, against freshly built or installed packages
+  fetch-rpi0.sh          The Pi Zero kernel, DTB, overlays and modules the raspi0 tests boot
+  usbip-interop.sh       USB/IP interop with the runner kernel's vhci-hcd (root, no container)
   build-static.sh        The static binary for the GitHub Release
 .github/workflows/
   deb.yml                Build, test and publish the packages ("Debian packages")
+  apt-smoke-test.yml     After main publishes: install that build from apt, boot-test it
 run-rpi-boot-test.py              Interactive boot test (U-Boot via serial, -nic user)
 run-rpi-pxeboot-test.py           Autonomous PXE boot test (-nic user)
 run-rpi-socket-boot-test.py       Socket networking boot test (no peer, -nic socket)
 run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic socket)
 run-usbip-test.py                 USB/IP server test (-M none, QEMU USB devices)
 run-usbip-vhci-test.py            USB/IP interop with the kernel's vhci-hcd (root)
+run-rpi0-boot-test.py             raspi0 (Pi Zero W) boot, serial, usb-net and SD checks
 run-rpi0-gadget-test.py           raspi0 USB gadget (dwc2 peripheral mode) over USB/IP
 run-rpi0-gadget-vhci-test.py      raspi0 USB gadget on the host kernel's vhci-hcd (root)
 ```
@@ -288,19 +292,26 @@ for a patch series. Every pull request builds and tests preview packages
 ```
 Push to main or a pull request
   │
-  ├─ test ─────────── unit tests (patch series setup, pins)
+  ├─ test ─────────── unit tests (patch series setup, pins, USB/IP client)
   │
   ├─ build-deb ────── trixie, forky, sid × amd64, arm64, riscv64:
   │                     QEMU from upstreams.toml, built with apt-repo-action's build-deb
   │                     (+ qemu-rpi-pxeboot from U-Boot, on amd64)
   │                     Install test: install into a clean container, --version
-  │                     Boot test (amd64): boot a Pi kernel directly, over socket
-  │                     networking and over PXE, with this build's packages
+  │                     Boot test (amd64): boot a Pi 4B kernel directly, over socket
+  │                     networking and over PXE; the USB/IP server; the Pi Zero W
+  │                     kernel on raspi0 and its USB gadget; with this build's packages
+  │                     trixie amd64: the static binary, and USB/IP interop with the
+  │                     runner kernel's vhci-hcd on it (the Zero's gadget too)
   │
   ├─ publish-apt ──── main only: https://fpgas.online/rpi-qemu/
   └─ release ──────── main only: GitHub Release build-<version>, every .deb
-                        and the static binary
+                        and the tested static binary
 ```
+
+After main publishes, `apt-smoke-test.yml` installs exactly that build's
+packages from the apt repository, once Pages serves them, and runs the boot
+tests again on what apt clients get.
 
 Versions are `2:<QEMU version>+fpgasonline.<X.Y.postN>~deb<R>`, for example
 `2:11.1.0+fpgasonline.0.1.post121~deb13`: the QEMU release first, then this
