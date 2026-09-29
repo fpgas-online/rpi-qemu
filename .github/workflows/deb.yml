@@ -73,7 +73,7 @@ jobs:
       # merge.
       - name: Build
         id: build
-        uses: mithro/apt-repo-action/build-deb@phase2/integration
+        uses: mithro/apt-repo-action/build-deb@main
         with:
           suite: ${{ matrix.suite }}
           arch: ${{ matrix.arch }}
@@ -89,7 +89,7 @@ jobs:
 
       - name: Build qemu-rpi-pxeboot
         if: matrix.arch == 'amd64'
-        uses: mithro/apt-repo-action/build-deb@phase2/integration
+        uses: mithro/apt-repo-action/build-deb@main
         with:
           suite: ${{ matrix.suite }}
           arch: all
@@ -220,7 +220,7 @@ jobs:
       # TODO: @main once apt-repo-action#27 merges.
       - name: Version
         id: version
-        uses: mithro/apt-repo-action/deb-version@phase2/integration
+        uses: mithro/apt-repo-action/deb-version@main
         with:
           suite: sid
           version-args: --owner-tag fpgasonline --upstream-version ${{ steps.upstream.outputs.version }}
