@@ -129,9 +129,26 @@ jobs:
             test-images/bcm2711-rpi-4-b.dtb
           key: rpi-kernel-v2
 
-      # Boots a Raspberry Pi kernel in the qemu-rpi-system-aarch64 just built,
-      # directly, over socket networking and over PXE with qemu-rpi-pxeboot.
-      # On amd64, where both packages are built.
+      # The Raspberry Pi Zero's files (ci/fetch-rpi0.sh), from one pinned
+      # raspberrypi/firmware commit, so a cache hit and a miss boot the same
+      # kernel.
+      - name: Cache the Raspberry Pi Zero kernel
+        if: matrix.arch == 'amd64'
+        uses: actions/cache@v6
+        with:
+          path: |
+            test-images/rpi0/kernel.img
+            test-images/rpi0/bcm2708-rpi-zero-w.dtb
+            test-images/rpi0/disable-bt.dtbo
+            test-images/rpi0/dwc2.dtbo
+            test-images/rpi0/modules
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget-sslb
+
+      # Boots a Raspberry Pi 4B kernel in the qemu-rpi-system-aarch64 just
+      # built, directly, over socket networking and over PXE with
+      # qemu-rpi-pxeboot; exports a device over USB/IP; and boots the Pi
+      # Zero W kernel on raspi0, its USB gadget too (ci/boot-test.sh). On
+      # amd64, where both packages are built.
       - name: Boot test
         if: matrix.arch == 'amd64'
         env:

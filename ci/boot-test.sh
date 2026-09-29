@@ -1,7 +1,9 @@
 #!/bin/sh
 # Boot-test the packages one build made: boot a Raspberry Pi kernel and
 # initramfs in qemu-rpi-system-aarch64 -M raspi4b, over U-Boot, over socket
-# networking and over PXE with qemu-rpi-pxeboot's firmware.
+# networking and over PXE with qemu-rpi-pxeboot's firmware; export a device
+# over USB/IP; and boot the stock Raspberry Pi Zero W kernel on -M raspi0,
+# its USB gadget included.
 #
 # Runs as root inside a clean debian:<suite> container (deb.yml's "Boot test"
 # step), with:
@@ -63,3 +65,29 @@ echo "=== PXE boot test (cfgtxt + gzip decompression), with qemu-rpi-pxeboot's f
 QEMU_OVERRIDE=$qemu PXEBOOT_OVERRIDE=$pxeboot python3 run-rpi-pxeboot-test.py
 echo "=== PXE boot test from a flat TFTP root (prefix fallback) ==="
 QEMU_OVERRIDE=$qemu PXEBOOT_OVERRIDE=$pxeboot PXE_FLAT=1 python3 run-rpi-pxeboot-test.py
+
+echo "=== USB/IP server test ==="
+QEMU_OVERRIDE=$qemu python3 run-usbip-test.py
+
+echo "=== Raspberry Pi Zero kernel, device tree, overlays and modules ==="
+# Restored from the runner's cache (deb.yml) when present.
+sh ci/fetch-rpi0.sh
+apt-get install -y --no-install-recommends device-tree-compiler
+# Debian's dtc (1.7.2 in trixie) applies dwc2.dtbo; Ubuntu 24.04's 1.7.0
+# fails on it (FDT_ERR_NOTFOUND).
+fdtoverlay -i test-images/rpi0/bcm2708-rpi-zero-w.dtb \
+  -o test-images/rpi0/bcm2708-rpi-zero-w-disable-bt.dtb test-images/rpi0/disable-bt.dtbo
+# dtoverlay=dwc2: the upstream dwc2 driver on the OTG port (#22).
+fdtoverlay -i test-images/rpi0/bcm2708-rpi-zero-w.dtb \
+  -o test-images/rpi0/bcm2708-rpi-zero-w-dwc2.dtb test-images/rpi0/dwc2.dtbo
+
+echo "=== Raspberry Pi Zero initramfs ==="
+python3 build-initramfs.py --target rpi0
+python3 build-initramfs.py --target rpi0-gadget
+
+# Boot 1 makes a sparse 4 GiB test-images/rpi0-sd.img for its SD discard
+# check (#39), which the harness deletes again.
+echo "=== Raspberry Pi Zero (raspi0) boot test ==="
+QEMU_OVERRIDE=$qemu python3 run-rpi0-boot-test.py
+echo "=== Raspberry Pi Zero (raspi0) USB gadget test ==="
+QEMU_OVERRIDE=$qemu python3 run-rpi0-gadget-test.py
