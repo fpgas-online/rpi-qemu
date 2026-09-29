@@ -5,22 +5,25 @@
 # over USB/IP; and boot the stock Raspberry Pi Zero W kernel on -M raspi0,
 # its USB gadget included.
 #
-# Runs as root inside a clean debian:<suite> container (deb.yml's "Boot test"
-# step), with:
-#   /src   this repository's checkout, read-write (the tests write
-#          test-images/ and tmp/);
-#   /debs  the built .debs, qemu-rpi-pxeboot's included.
+# Runs as root inside a clean debian:<suite> container, in this repository's
+# checkout (read-write: the tests write test-images/ and tmp/):
+#   - deb.yml's "Boot test" step, with the build's .debs, qemu-rpi-pxeboot's
+#     included, in /debs;
+#   - apt-smoke-test.yml, with BOOT_TEST_PACKAGES=installed: the packages
+#     are already installed, from the published apt repository.
 set -eu
 export DEBIAN_FRONTEND=noninteractive
+cd "$(dirname "$0")/.."
 
 apt-get update
-apt-get install -y /debs/qemu-rpi-system-arm_*.deb /debs/qemu-rpi-system-data_*.deb \
-  /debs/qemu-rpi-pxeboot_*.deb
+if [ "${BOOT_TEST_PACKAGES:-debs}" != installed ]; then
+  apt-get install -y /debs/qemu-rpi-system-arm_*.deb /debs/qemu-rpi-system-data_*.deb \
+    /debs/qemu-rpi-pxeboot_*.deb
+fi
 apt-get install -y --no-install-recommends ca-certificates git wget cpio python3 \
   build-essential gcc-aarch64-linux-gnu make bc bison flex libssl-dev
 qemu=$(command -v qemu-rpi-system-aarch64)
 "$qemu" --version
-cd /src
 
 pin() {
   python3 -c 'import sys, tomllib; print(tomllib.load(open("upstreams.toml", "rb"))["qemu-rpi-pxeboot"][sys.argv[1]])' "$1"

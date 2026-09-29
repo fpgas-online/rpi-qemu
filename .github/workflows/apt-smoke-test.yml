@@ -1,0 +1,147 @@
+name: APT smoke test
+
+# After a build on main has published, install exactly that build's packages
+# from the apt repository, as a user would, and run the boot tests on them.
+# The build's own Boot test ran on the same files before they were
+# published; this checks what apt serves (rpi-qemu#10: the Pages deployment
+# can lag the build, and a smoke test that installs whatever is there tests
+# a stale package).
+#
+# It follows deb.yml through workflow_run, which docs/packaging.md in
+# mithro/apt-repo-action allows ("A workflow that follows deb.yml"): it
+# names "Debian packages", acts only on a successful run that isn't a pull
+# request's, and checks out the commit that was built.
+on:
+  workflow_run:
+    workflows: ["Debian packages"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    # branches: [main] matches the triggering run's branch *name*, which a
+    # pull request from a fork's own main has too, and this job runs the
+    # built commit's code with the base repository's caches: so a pull
+    # request's run is excluded explicitly.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event != 'pull_request')
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 60
+    steps:
+      - name: Install base tools
+        run: |
+          apt-get update
+          apt-get install -y git ca-certificates curl python3
+
+      # The commit that was built and published, not whatever main is by
+      # now, with full history for its version.
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Mark the checkout safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Upstream versions
+        id: upstream
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import tomllib
+          pins = tomllib.load(open("upstreams.toml", "rb"))
+          print("qemu=" + pins["qemu-rpi"]["version"])
+          print("pxeboot=" + pins["qemu-rpi-pxeboot"]["version"])
+          EOF
+
+      # The versions that build published for trixie, as deb.yml's build-deb
+      # stamped them.
+      - name: QEMU's version
+        id: qemu
+        uses: mithro/apt-repo-action/deb-version@main
+        with:
+          suite: trixie
+          version-args: --owner-tag fpgasonline --upstream-version ${{ steps.upstream.outputs.qemu }} --epoch 2
+
+      - name: qemu-rpi-pxeboot's version
+        id: pxeboot
+        uses: mithro/apt-repo-action/deb-version@main
+        with:
+          suite: trixie
+          version-args: --owner-tag fpgasonline --upstream-version ${{ steps.upstream.outputs.pxeboot }} --epoch 2
+
+      - name: Install from the apt repository
+        env:
+          EVENT: ${{ github.event_name }}
+          QEMU_VERSION: ${{ steps.qemu.outputs.version }}
+          PXEBOOT_VERSION: ${{ steps.pxeboot.outputs.version }}
+        run: |
+          set -eu
+          install -d -m0755 /etc/apt/keyrings
+          curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg > /etc/apt/keyrings/rpi-qemu.gpg
+          echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
+            > /etc/apt/sources.list.d/rpi-qemu.list
+          apt-get update
+          if [ "$EVENT" = workflow_run ]; then
+            # Wait until the repository serves exactly this build's version
+            # (rpi-qemu#10), then install that; a version that never
+            # appears fails the pinned install.
+            echo "=== Waiting for qemu-rpi-system-arm $QEMU_VERSION ==="
+            for attempt in $(seq 1 30); do
+              # madison pads the version column; compare the trimmed field.
+              if apt-cache madison qemu-rpi-system-arm |
+                 awk -F'|' -v v="$QEMU_VERSION" '{gsub(/ /, "", $2)} $2 == v {f = 1} END {exit !f}'; then
+                break
+              fi
+              echo "attempt $attempt: $QEMU_VERSION not served yet"
+              sleep 20
+              apt-get update || echo "apt-get update failed; retrying"
+            done
+            apt-get install -y "qemu-rpi-system-arm=$QEMU_VERSION" \
+              "qemu-rpi-system-data=$QEMU_VERSION" "qemu-rpi-pxeboot=$PXEBOOT_VERSION"
+          else
+            apt-get install -y qemu-rpi-system-arm qemu-rpi-system-data qemu-rpi-pxeboot
+          fi
+          dpkg-query -W qemu-rpi-system-arm qemu-rpi-system-data qemu-rpi-pxeboot
+          qemu-rpi-system-aarch64 --version
+
+      - name: Cache the Raspberry Pi kernel
+        uses: actions/cache@v6
+        with:
+          path: |
+            test-images/kernel8.img
+            test-images/bcm2711-rpi-4-b.dtb
+          key: rpi-kernel-v2
+
+      - name: Cache the Raspberry Pi Zero kernel
+        uses: actions/cache@v6
+        with:
+          path: |
+            test-images/rpi0/kernel.img
+            test-images/rpi0/bcm2708-rpi-zero-w.dtb
+            test-images/rpi0/disable-bt.dtbo
+            test-images/rpi0/dwc2.dtbo
+            test-images/rpi0/modules
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget-sslb
+
+      - name: Boot tests, on the installed packages
+        env:
+          BOOT_TEST_PACKAGES: installed
+        run: sh ci/boot-test.sh
+
+      - name: Upload the boot test's logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: apt-smoke-test-log
+          path: |
+            tmp/
+            !tmp/src/
+          retention-days: 7
