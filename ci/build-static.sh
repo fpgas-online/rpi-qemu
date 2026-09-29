@@ -4,9 +4,10 @@
 # subprojects/slirp), with ci/qemu-patches/ minus 0017, which is for that
 # tarball only.
 #
-# Runs as root inside a clean debian:trixie container (deb.yml's release job)
-# with this repository's checkout as the working directory. Writes
-# tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz.
+# Runs as root inside a clean debian:trixie container (deb.yml's build-deb
+# job, trixie amd64), with this repository's checkout as the working
+# directory. Writes tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz,
+# which ci/usbip-interop.sh tests and the release job publishes.
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 apt-get update

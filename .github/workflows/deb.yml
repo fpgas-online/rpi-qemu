@@ -158,6 +158,31 @@ jobs:
             -v "$PWD:/src" -v "$PWD/built-debs:/debs:ro" \
             "debian:$SUITE" sh /src/ci/boot-test.sh
 
+      # The static binary for the GitHub Release: built once, on trixie amd64,
+      # and tested below before the release job publishes this very file.
+      - name: Build the static binary
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        run: docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src debian:trixie sh ci/build-static.sh
+
+      # The kernel's own USB/IP host (vhci-hcd) with this build's QEMU
+      # (ci/usbip-interop.sh). On the runner itself, not in a container,
+      # since it loads vhci-hcd into the runner's kernel; so it tests the
+      # static binary, which runs on the runner's Ubuntu. publish-apt and
+      # release need this job, so they wait for it as for the boot test.
+      - name: USB/IP interop (vhci-hcd)
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        timeout-minutes: 25
+        run: sudo sh ci/usbip-interop.sh
+
+      - name: Upload the static binary
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-rpi-static
+          path: tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload the boot test's logs
         if: failure() && matrix.arch == 'amd64'
         uses: actions/upload-artifact@v7
@@ -166,6 +191,7 @@ jobs:
           path: |
             tmp/
             !tmp/src/
+            !tmp/qemu-static-src/
           retention-days: 7
 
       # docs/packaging.md, "Package contents": a -dbgsym over 10 MB goes to
@@ -243,9 +269,6 @@ jobs:
           suite: sid
           version-args: --owner-tag fpgasonline --upstream-version ${{ steps.upstream.outputs.version }}
 
-      - name: Build the static binary
-        run: docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src debian:trixie sh ci/build-static.sh
-
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
@@ -262,7 +285,8 @@ jobs:
               cp -v "$deb" "release/${suite}_$(basename "$deb")"
             done
           done
-          cp -v tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz release/
+          # build-deb's trixie amd64 job built and tested it.
+          cp -v artifacts/qemu-rpi-static/qemu-rpi-static-linux-amd64.tar.gz release/
           ls -lh release/
 
       - name: Create the release
