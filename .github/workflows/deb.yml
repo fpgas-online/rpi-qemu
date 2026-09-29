@@ -121,7 +121,7 @@ jobs:
 
       - name: Cache the Raspberry Pi kernel
         if: matrix.arch == 'amd64'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             test-images/kernel8.img
