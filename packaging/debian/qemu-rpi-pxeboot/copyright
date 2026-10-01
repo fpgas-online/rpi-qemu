@@ -1,0 +1,21 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: U-Boot
+Upstream-Contact: u-boot@lists.denx.de
+Source: https://source.denx.de/u-boot/u-boot
+
+Files: *
+Copyright: 2000-2026 Wolfgang Denk and the U-Boot developers
+License: GPL-2+
+
+Files: debian/* configs/rpi_4_qemu_pxeboot_defconfig board/raspberrypi/rpi/pxeboot.env
+Copyright: 2026 Tim 'mithro' Ansell <me@mith.ro>
+License: GPL-2+
+
+License: GPL-2+
+ This program is free software; you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the Free
+ Software Foundation; either version 2 of the License, or (at your option)
+ any later version.
+ .
+ On Debian systems, the full text of the GNU General Public License version 2
+ can be found in the file /usr/share/common-licenses/GPL-2.

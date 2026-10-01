@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the Debian patch-setup logic used by build-debs.py.
+"""Tests for the Debian patch-setup logic used by prepare-source.py.
 
 Regression test for https://github.com/fpgas-online/rpi-qemu/issues/6:
 a stale checked-in ``series`` file silently dropped patches 0018-0022
@@ -19,7 +19,7 @@ from pathlib import Path
 # ci/ is this file's directory — put it on sys.path so the tests can
 # import debian_patches regardless of cwd.
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
-from debian_patches import setup_debian_patches
+from debian_patches import GENERATED, setup_debian_patches
 
 
 class SetupDebianPatchesTest(unittest.TestCase):
@@ -92,6 +92,20 @@ class SetupDebianPatchesTest(unittest.TestCase):
             (debian_dst / "patches" / "series").read_text().strip(),
             "0001-only.patch",
         )
+
+    def test_marks_the_series_generated(self):
+        """build-deb must check every patch applied: dpkg-source alone
+        builds unpatched QEMU when the first patch stops applying."""
+        patches_src = self.tmp / "qemu-patches"
+        self._make_patches(patches_src, ["0001-only.patch"])
+        debian_dst = self.tmp / "source" / "debian"
+        debian_dst.mkdir(parents=True)
+
+        setup_debian_patches(debian_dst, patches_src)
+
+        self.assertEqual(GENERATED, ".generated")
+        self.assertTrue((debian_dst / "patches" / GENERATED).is_file())
+        self.assertNotIn(GENERATED, (debian_dst / "patches" / "series").read_text())
 
     def test_overwrites_stale_series_file(self):
         """If a series file is already present, it is replaced, not merged.

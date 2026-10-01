@@ -25,28 +25,34 @@ This project patches QEMU to add Ethernet support to the `raspi4b` machine, maki
 
 ## Requirements
 
-- **Host:** x86_64 Linux (Debian trixie or compatible)
+- **Host:** 64-bit Debian trixie, forky or sid on amd64, arm64 or riscv64 (QEMU 11 supports no 32-bit host), or any x86_64 Linux with the static binary
 - **Pi model:** Raspberry Pi 4B (`raspi4b`) and Raspberry Pi Zero / Zero W (`raspi0`)
 - **Kernel/DTB/initrd:** from [raspberrypi/firmware](https://github.com/raspberrypi/firmware/tree/master/boot) or your own build
 
 ## Install
 
-### APT (Debian trixie / amd64)
+### APT
 
-```bash
-# Add the repository (signed; setup also on https://fpgas.online/rpi-qemu/)
+The packages are published as a signed apt repository per Debian suite
+(trixie, forky and sid), for amd64, arm64 and riscv64: put your suite's name
+in place of `trixie` below. The same setup is on https://fpgas.online/rpi-qemu/.
+
+```sh
 sudo install -d -m0755 /etc/apt/keyrings
 curl -fsSL https://fpgas.online/rpi-qemu/rpi-qemu.gpg | sudo tee /etc/apt/keyrings/rpi-qemu.gpg > /dev/null
 echo "deb [signed-by=/etc/apt/keyrings/rpi-qemu.gpg] https://fpgas.online/rpi-qemu/trixie/ ./" \
   | sudo tee /etc/apt/sources.list.d/rpi-qemu.list
-sudo apt-get update
+sudo apt update
 
-# Install QEMU with RPi Ethernet support
-sudo apt-get install qemu-rpi-system-arm
-
-# Optional: PXE boot firmware (enables network boot from a TFTP server)
-sudo apt-get install qemu-rpi-pxeboot
+# QEMU with Raspberry Pi Ethernet support
+sudo apt install qemu-rpi-system-arm
+# Optional: PXE boot firmware (network boot from a TFTP server)
+sudo apt install qemu-rpi-pxeboot
 ```
+
+The repository's signing key is
+`459E D319 B038 EA0D 47EA  C0B0 F9B8 2596 6D96 73FF`
+(`gpg --show-keys /etc/apt/keyrings/rpi-qemu.gpg` shows it).
 
 ### Static Binary (no installation needed)
 
@@ -160,7 +166,7 @@ The firmware handles DHCP and TFTP automatically, loads your kernel from the TFT
 
 ### Using in CI (GitHub Actions)
 
-> **Important:** The APT packages are built on Debian trixie. On Ubuntu runners, use a `debian:trixie` container.
+> **Important:** The APT packages are built for Debian (trixie, forky, sid). On Ubuntu runners, use a `debian:trixie` container.
 
 ```yaml
 jobs:
@@ -212,22 +218,31 @@ All packages use `qemu-rpi-*` naming to coexist with standard Debian `qemu-syste
 ### Repository Structure
 
 ```
+upstreams.toml           The pins: QEMU's Debian orig tarball, U-Boot's commit
+packaging/debian/
+  qemu-rpi/              Debian packaging for qemu-rpi-system-arm and -data
+  qemu-rpi-pxeboot/      Debian packaging for the PXE boot firmware (U-Boot)
 ci/
-  qemu-patches/          23 patches adding GENET Ethernet to QEMU v11.1.0
-  debian/                Debian packaging for qemu-rpi-* packages
+  qemu-patches/          Patches adding GENET Ethernet to QEMU v11.1.0
+  uboot-patches/         U-Boot config.txt and cmdline.txt parsers
   vc-boot-pi4b.env       VideoCore boot emulation script (U-Boot environment)
   rpi_4_qemu_defconfig   U-Boot config for interactive testing
   rpi_4_qemu_pxeboot_defconfig  U-Boot config for PXE boot firmware
-  build-debs.py          Local .deb build script
+  prepare-source.py      Fetch a pin and put our patches and debian/ into it
+  boot-test.sh           The boot tests, against freshly built or installed packages
+  fetch-rpi0.sh          The Pi Zero kernel, DTB, overlays and modules the raspi0 tests boot
+  usbip-interop.sh       USB/IP interop with the runner kernel's vhci-hcd (root, no container)
+  build-static.sh        The static binary for the GitHub Release
 .github/workflows/
-  build-qemu-packages.yml   Build debs + pxeboot firmware, publish APT repo
-  rpi-boot-test.yml          End-to-end boot test
+  deb.yml                Build, test and publish the packages ("Debian packages")
+  apt-smoke-test.yml     After main publishes: install that build from apt, boot-test it
 run-rpi-boot-test.py              Interactive boot test (U-Boot via serial, -nic user)
 run-rpi-pxeboot-test.py           Autonomous PXE boot test (-nic user)
 run-rpi-socket-boot-test.py       Socket networking boot test (no peer, -nic socket)
 run-rpi-socket-network-test.py    Socket networking with DHCP/TFTP peer (-nic socket)
 run-usbip-test.py                 USB/IP server test (-M none, QEMU USB devices)
 run-usbip-vhci-test.py            USB/IP interop with the kernel's vhci-hcd (root)
+run-rpi0-boot-test.py             raspi0 (Pi Zero W) boot, serial, usb-net and SD checks
 run-rpi0-gadget-test.py           raspi0 USB gadget (dwc2 peripheral mode) over USB/IP
 run-rpi0-gadget-vhci-test.py      raspi0 USB gadget on the host kernel's vhci-hcd (root)
 ```
@@ -269,18 +284,38 @@ uv run run-rpi-socket-network-test.py    # full DHCP/TFTP over socket
 
 ### CI Architecture
 
+`deb.yml` follows mithro/apt-repo-action's
+[packaging conventions](https://github.com/mithro/apt-repo-action/blob/main/docs/packaging.md)
+for a patch series. Every pull request builds and tests preview packages
+(versions ending `~pr<N>`); only main publishes.
+
 ```
-Push to main
+Push to main or a pull request
   │
-  ├─ build-debs ─────── QEMU .deb packages (debian:trixie container)
-  ├─ build-static ───── Static QEMU binary (no dependencies)
-  ├─ build-pxeboot ──── PXE boot firmware (U-Boot cross-compile)
+  ├─ test ─────────── unit tests (patch series setup, pins, USB/IP client)
   │
-  ├─ publish-apt-repo ─ Deploy to GitHub Pages APT repo
-  ├─ create-release ─── GitHub Release with all artifacts
+  ├─ build-deb ────── trixie, forky, sid × amd64, arm64, riscv64:
+  │                     QEMU from upstreams.toml, built with apt-repo-action's build-deb
+  │                     (+ qemu-rpi-pxeboot from U-Boot, on amd64)
+  │                     Install test: install into a clean container, --version
+  │                     Boot test (amd64): boot a Pi 4B kernel directly, over socket
+  │                     networking and over PXE; the USB/IP server; the Pi Zero W
+  │                     kernel on raspi0 and its USB gadget; with this build's packages
+  │                     trixie amd64: the static binary, and USB/IP interop with the
+  │                     runner kernel's vhci-hcd on it (the Zero's gadget too)
   │
-  └─ rpi-boot-test ──── Install from APT, boot QEMU, verify networking
+  ├─ publish-apt ──── main only: https://fpgas.online/rpi-qemu/
+  └─ release ──────── main only: GitHub Release build-<version>, every .deb
+                        and the tested static binary
 ```
+
+After main publishes, `apt-smoke-test.yml` installs exactly that build's
+packages from the apt repository, once Pages serves them, and runs the boot
+tests again on what apt clients get.
+
+Versions are `2:<QEMU version>+fpgasonline.<X.Y.postN>~deb<R>`, for example
+`2:11.1.0+fpgasonline.0.1.post121~deb13`: the QEMU release first, then this
+repository's commits since its last `vX.Y` tag, then the suite (none for sid).
 
 ## License
 

@@ -1,9 +1,10 @@
 #!/usr/bin/make -f
 SHELL = /bin/sh -e
 
-# Parallel build support
-MAKEFLAGS += $(subst parallel=,-j,$(filter parallel=%,${DEB_BUILD_OPTIONS}))
-NUMJOBS := $(lastword 1 $(subst -j,,$(filter -j%,${MAKEFLAGS})))
+# Parallel build: DEB_BUILD_OPTIONS=parallel=N when given, else every CPU.
+# (apt-repo-action's build-deb sets no DEB_BUILD_OPTIONS, and ninja -j1
+# would take the build from minutes to hours.)
+NUMJOBS := $(or $(patsubst parallel=%,%,$(filter parallel=%,${DEB_BUILD_OPTIONS})),$(shell nproc))
 
 NINJA = ninja $(if $(filter terse, ${DEB_BUILD_OPTIONS}),,-v) -j${NUMJOBS}
 

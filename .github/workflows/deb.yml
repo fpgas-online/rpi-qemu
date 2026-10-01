@@ -1,0 +1,309 @@
+name: Debian packages
+
+# Every push to main builds, boot-tests and publishes the packages; every pull
+# request builds and tests previews (~pr<P>), never published. The layout is
+# docs/packaging.md in mithro/apt-repo-action.
+#
+# A patch series: QEMU and U-Boot are fetched at the pins in upstreams.toml,
+# ci/prepare-source.py puts our patches and packaging/debian/<name>/ into
+# each, and apt-repo-action's build-deb builds them. So the build is a job of
+# our own rather than the reusable build-deb.yml, which runs nothing before
+# the build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deb-${{ github.ref }}
+  # A newer push to a pull request cancels the older build. On main a running
+  # publish is never cancelled: the newest push waits for it, and replaces any
+  # older push still waiting (it contains that one's commits).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+      - name: Unit tests
+        run: |
+          uv run ci/test_build_debs.py
+          uv run ci/test_prepare_source.py
+          uv run ci/test_usbip_client.py
+      # The release job runs only on main: check its asset naming on every
+      # build (ci/release-assets.sh).
+      - name: Release asset names
+        run: sh ci/release-assets-test.sh
+
+  build-deb:
+    name: build-deb (${{ matrix.suite }} ${{ matrix.arch }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    # riscv64 builds under QEMU user emulation.
+    timeout-minutes: ${{ matrix.arch == 'riscv64' && 360 || 60 }}
+    strategy:
+      fail-fast: false
+      # The architectures QEMU 11 runs on (.github/apt-packaging.toml,
+      # PKG-ARCH), in the default suites.
+      matrix:
+        suite: [trixie, forky, sid]
+        arch: [amd64, arm64, riscv64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: riscv64
+            runner: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the version needs history and tags
+
+      - name: Prepare the QEMU source
+        id: qemu
+        run: python3 ci/prepare-source.py qemu-rpi --github-output "$GITHUB_OUTPUT"
+
+      # Every job builds the Architecture: all qemu-rpi-system-data too, so its
+      # install test has it; only amd64's copy is uploaded (see Upload).
+      # TODO: @main once apt-repo-action#27 (patch series versions) and #26
+      # merge.
+      - name: Build
+        id: build
+        uses: mithro/apt-repo-action/build-deb@main
+        with:
+          suite: ${{ matrix.suite }}
+          arch: ${{ matrix.arch }}
+          source-dir: ${{ steps.qemu.outputs.dir }}
+          version-tree: .
+          version-args: --owner-tag fpgasonline --upstream-version ${{ steps.qemu.outputs.version }} --epoch 2
+
+      # qemu-rpi-pxeboot is Architecture: all: built once per suite, on amd64.
+      - name: Prepare the U-Boot source
+        id: uboot
+        if: matrix.arch == 'amd64'
+        run: python3 ci/prepare-source.py qemu-rpi-pxeboot --github-output "$GITHUB_OUTPUT"
+
+      - name: Build qemu-rpi-pxeboot
+        if: matrix.arch == 'amd64'
+        uses: mithro/apt-repo-action/build-deb@main
+        with:
+          suite: ${{ matrix.suite }}
+          arch: all
+          source-dir: ${{ steps.uboot.outputs.dir }}
+          version-tree: .
+          version-args: --owner-tag fpgasonline --upstream-version ${{ steps.uboot.outputs.version }} --epoch 2
+
+      # In a clean container of the suite, on the build's own architecture
+      # (emulated for riscv64), with the platform named: after an emulated
+      # build the local debian:<suite> tag is that architecture's image.
+      - name: Install test
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+          PLATFORM: ${{ steps.build.outputs.platform }}
+          APT_SOURCES: ${{ steps.build.outputs.apt-sources }}
+        run: |
+          docker run --rm --platform "$PLATFORM" \
+            -v "$APT_SOURCES:/apt-sources:ro" -v "$PWD/built-debs:/debs:ro" \
+            "$IMAGE" sh -ec '
+              export DEBIAN_FRONTEND=noninteractive
+              sh /apt-sources/install.sh
+              apt-get update
+              apt-get install -y /debs/*.deb
+              qemu-rpi-system-aarch64 --version
+              if dpkg-query -W qemu-rpi-pxeboot; then
+                test -s /usr/share/qemu-rpi-pxeboot/rpi4b-pxeboot.bin
+                test -s /usr/share/qemu-rpi-pxeboot/rpi4b-pxeboot.dtb
+              fi'
+
+      - name: Cache the Raspberry Pi kernel
+        if: matrix.arch == 'amd64'
+        uses: actions/cache@v6
+        with:
+          path: |
+            test-images/kernel8.img
+            test-images/bcm2711-rpi-4-b.dtb
+          key: rpi-kernel-v2
+
+      # The Raspberry Pi Zero's files (ci/fetch-rpi0.sh), from one pinned
+      # raspberrypi/firmware commit, so a cache hit and a miss boot the same
+      # kernel.
+      - name: Cache the Raspberry Pi Zero kernel
+        if: matrix.arch == 'amd64'
+        uses: actions/cache@v6
+        with:
+          path: |
+            test-images/rpi0/kernel.img
+            test-images/rpi0/bcm2708-rpi-zero-w.dtb
+            test-images/rpi0/disable-bt.dtbo
+            test-images/rpi0/dwc2.dtbo
+            test-images/rpi0/modules
+          key: rpi0-kernel-bead686816848038563a542dc854346ab13253a2-dtbo-usbnet-gadget-sslb
+
+      # Boots a Raspberry Pi 4B kernel in the qemu-rpi-system-aarch64 just
+      # built, directly, over socket networking and over PXE with
+      # qemu-rpi-pxeboot; exports a device over USB/IP; and boots the Pi
+      # Zero W kernel on raspi0, its USB gadget too (ci/boot-test.sh). On
+      # amd64, where both packages are built.
+      - name: Boot test
+        if: matrix.arch == 'amd64'
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD:/src" -v "$PWD/built-debs:/debs:ro" \
+            "debian:$SUITE" sh /src/ci/boot-test.sh
+
+      # The static binary for the GitHub Release: built once, on trixie amd64,
+      # and tested below before the release job publishes this very file.
+      - name: Build the static binary
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        run: docker run --rm --platform linux/amd64 -v "$PWD:/src" -w /src debian:trixie sh ci/build-static.sh
+
+      # The kernel's own USB/IP host (vhci-hcd) with this build's QEMU
+      # (ci/usbip-interop.sh). On the runner itself, not in a container,
+      # since it loads vhci-hcd into the runner's kernel; so it tests the
+      # static binary, which runs on the runner's Ubuntu. publish-apt and
+      # release need this job, so they wait for it as for the boot test.
+      - name: USB/IP interop (vhci-hcd)
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        timeout-minutes: 25
+        run: sudo sh ci/usbip-interop.sh
+
+      - name: Upload the static binary
+        if: matrix.arch == 'amd64' && matrix.suite == 'trixie'
+        uses: actions/upload-artifact@v7
+        with:
+          name: qemu-rpi-static
+          path: tmp/static-output/qemu-rpi-static-linux-amd64.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the boot test's logs
+        if: failure() && matrix.arch == 'amd64'
+        uses: actions/upload-artifact@v7
+        with:
+          name: boot-test-log-${{ matrix.suite }}
+          path: |
+            tmp/
+            !tmp/src/
+            !tmp/qemu-static-src/
+          retention-days: 7
+
+      # docs/packaging.md, "Package contents": a -dbgsym over 10 MB goes to
+      # the GitHub Release only (qemu-rpi-system-arm-dbgsym is about 25 MB).
+      # The Architecture: all packages are uploaded from amd64 alone, so no
+      # two artifacts carry different files under one name.
+      - name: Keep large debug symbols out of apt
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dbgsym-debs
+          find built-debs -name '*-dbgsym_*.deb' -size +10M -exec mv -v {} dbgsym-debs/ \;
+          if [ "$ARCH" != amd64 ]; then
+            find built-debs -name '*_all.deb' -print -delete
+          fi
+          ls -l built-debs dbgsym-debs
+
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: debs-${{ matrix.suite }}-${{ matrix.arch }}
+          path: built-debs/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the debug symbols
+        uses: actions/upload-artifact@v7
+        with:
+          name: dbgsym-${{ matrix.suite }}-${{ matrix.arch }}
+          path: dbgsym-debs/*.deb
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish-apt:
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    needs: build-deb
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
+    with:
+      suites: "trixie forky sid"
+      description: "QEMU with Raspberry Pi 4B GENET Ethernet support"
+    secrets:
+      gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+
+  # docs/packaging.md, "GitHub Releases": every main build, tagged
+  # build-<version> (never v*), with every package, debug symbols included,
+  # named <suite>_<file>, and the static binary. Only on main, since it has
+  # contents: write and runs this repository's scripts.
+  release:
+    if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+    # After the publish: a build whose apt repository didn't deploy isn't
+    # released either, and a re-run of the workflow does both.
+    needs: [build-deb, publish-apt]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Upstream version
+        id: upstream
+        run: |
+          python3 -c 'import tomllib; print("version=" + tomllib.load(open("upstreams.toml", "rb"))["qemu-rpi"]["version"])' >> "$GITHUB_OUTPUT"
+
+      # sid's version: no ~deb<R>. No epoch, which a tag can't carry (":").
+      - name: Version
+        id: version
+        uses: mithro/apt-repo-action/deb-version@main
+        with:
+          suite: sid
+          version-args: --owner-tag fpgasonline --upstream-version ${{ steps.upstream.outputs.version }}
+
+      - name: Download the packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "*-*-*"
+          path: artifacts/
+
+      # Every package as <suite>_<file>, named as GitHub will store it (~
+      # becomes .), the static binary build-deb's trixie amd64 job built and
+      # tested, and SHA256SUMS over them (ci/release-assets.sh).
+      - name: The release's assets
+        run: |
+          sh ci/release-assets.sh artifacts release \
+            artifacts/qemu-rpi-static/qemu-rpi-static-linux-amd64.tar.gz
+          ls -lh release/
+          cat release/SHA256SUMS
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: "QEMU RPi ${{ steps.version.outputs.version }}"
+          body: |
+            QEMU ${{ steps.upstream.outputs.version }} with Raspberry Pi 4B GENET Ethernet support, and PXE
+            boot firmware with a config.txt parser (VideoCore parity), built from
+            ${{ github.sha }}.
+
+            Install from the apt repository (trixie, forky, sid; amd64, arm64, riscv64): see
+            https://fpgas.online/rpi-qemu/ or the README. Or download the static binary
+            (amd64, no dependencies). The .debs here are named <suite>_<file>, with
+            GitHub's . for ~ (so ~deb13 reads .deb13); SHA256SUMS lists them all.
+          files: release/*
+          make_latest: true

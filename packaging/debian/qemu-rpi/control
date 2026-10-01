@@ -1,13 +1,15 @@
 Source: qemu-rpi
 Section: otherosfs
 Priority: optional
-Maintainer: Tim Ansell <mithro@mithis.com>
+Maintainer: Tim 'mithro' Ansell <me@mith.ro>
 Build-Depends:
  debhelper-compat (= 13),
  meson (>> 1.5.0~),
  ninja-build,
  python3:any (>> 3.11),
  python3-venv:any,
+ python3-setuptools,
+ python3-pycotap,
  pkgconf,
  libglib2.0-dev,
  libpixman-1-dev,
@@ -22,7 +24,7 @@ Vcs-Git: https://github.com/fpgas-online/rpi-qemu.git
 Vcs-Browser: https://github.com/fpgas-online/rpi-qemu
 
 Package: qemu-rpi-system-arm
-Architecture: amd64
+Architecture: amd64 arm64 riscv64
 Depends: ${shlibs:Depends}, ${misc:Depends},
  qemu-rpi-system-data (= ${source:Version}),
 Description: QEMU with Raspberry Pi 4B GENET Ethernet support
@@ -43,5 +45,4 @@ Description: QEMU RPi data files (firmware, keymaps, etc.)
  Contains firmware blobs, keymaps, and other architecture-independent
  files for the QEMU RPi build.
 
-# Note: qemu-rpi-pxeboot is built separately from U-Boot (not QEMU)
-# and packaged directly in the CI publish-apt-repo step.
+# qemu-rpi-pxeboot is built from U-Boot, not QEMU: packaging/debian/qemu-rpi-pxeboot/.
