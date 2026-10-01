@@ -12,6 +12,10 @@ import shutil
 from pathlib import Path
 
 
+# Beside the series: apt-repo-action's build-deb checks every patch applied.
+GENERATED = ".generated"
+
+
 def setup_debian_patches(debian_dst: Path, patches_src: Path) -> int:
     """Install every patch from *patches_src* into *debian_dst*/patches/.
 
@@ -48,5 +52,15 @@ def setup_debian_patches(debian_dst: Path, patches_src: Path) -> int:
 
     series_path = patches_dst / "series"
     series_path.write_text("\n".join(patch_names) + "\n")
+
+    # None of these is applied to the tree yet. dpkg-source --before-build
+    # tries only the first patch and, when that doesn't apply (a QEMU bump
+    # that changed what it touches), takes the whole series as applied and
+    # exits 0: the package would be built from unpatched QEMU. The marker
+    # tells apt-repo-action's build-deb to apply the series itself and fail
+    # unless every patch applied (its docs/packaging.md, "Set B").
+    (patches_dst / GENERATED).write_text(
+        "Written by ci/debian_patches.py from ci/qemu-patches/: none is applied "
+        "to the tree yet, so build-deb checks every patch in series applies.\n")
 
     return len(patch_names)
